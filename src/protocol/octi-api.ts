@@ -133,3 +133,70 @@ export async function listDevices(args: {
   const body = (await res.json()) as DeviceListResponse;
   return body.devices;
 }
+
+function moduleUrl(server: ServerAddress, moduleId: string, targetDeviceId: string): string {
+  return `${serverBaseUrl(server)}/v1/module/${encodeURIComponent(moduleId)}?device-id=${encodeURIComponent(targetDeviceId)}`;
+}
+
+/**
+ * {@code GET /v1/module/{moduleId}?device-id={target}} (authed). Returns the
+ * raw encrypted module payload bytes, or `null` if the server has no payload
+ * yet for that target device + module pair (HTTP 204 / empty body).
+ *
+ * The caller is responsible for decrypting + gunzipping the bytes. See
+ * {@link decryptModulePayload}.
+ */
+export async function readModulePayload(args: {
+  server: ServerAddress;
+  creds: AuthCreds;
+  targetDeviceId: string;
+  moduleId: string;
+}): Promise<Uint8Array | null> {
+  const url = moduleUrl(args.server, args.moduleId, args.targetDeviceId);
+  const res = await fetch(url, {
+    method: "GET",
+    headers: {
+      ...deviceHeaders(args.creds.deviceId, null),
+      Authorization: basicAuthHeader(args.creds.accountId, args.creds.devicePassword),
+    },
+  });
+  if (res.status === 204) return null;
+  if (!res.ok) {
+    throw new OctiApiError(res.status, `module/${args.moduleId}`, await res.text().catch(() => ""));
+  }
+  const buf = await res.arrayBuffer();
+  if (buf.byteLength === 0) return null;
+  return new Uint8Array(buf);
+}
+
+/**
+ * {@code POST /v1/module/{moduleId}?device-id={target}} (authed, legacy write).
+ * Body is the already-encrypted payload bytes. For our own writes,
+ * `targetDeviceId === creds.deviceId`. Writing to another device's slot is
+ * supported by the server but we never do it from the web client.
+ *
+ * This is the pre-blob legacy POST path — sufficient for small payloads
+ * (MetaInfo, ClipboardInfo). The {@code PUT} commit + blob-session flow is
+ * only needed for file shares (M6).
+ */
+export async function writeModulePayload(args: {
+  server: ServerAddress;
+  creds: AuthCreds;
+  targetDeviceId: string;
+  moduleId: string;
+  ciphertext: Uint8Array;
+}): Promise<void> {
+  const url = moduleUrl(args.server, args.moduleId, args.targetDeviceId);
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      ...deviceHeaders(args.creds.deviceId, null),
+      Authorization: basicAuthHeader(args.creds.accountId, args.creds.devicePassword),
+      "Content-Type": "application/octet-stream",
+    },
+    body: args.ciphertext,
+  });
+  if (!res.ok) {
+    throw new OctiApiError(res.status, `module/${args.moduleId}`, await res.text().catch(() => ""));
+  }
+}
