@@ -7,18 +7,18 @@ import {
   type MetaInfo,
 } from "./meta";
 
+// Wire shape after null-stripping serialize: optional fields with no value are
+// absent from the JSON, not present as null. Keeps Android's strict decoder
+// happy for fields with non-nullable custom serializers (e.g. deviceBootedAt
+// via InstantSerializer).
 const sample: MetaInfo = {
   deviceLabel: "My Browser",
   deviceId: { id: "00000000-0000-0000-0000-000000000001" },
-  octiVersionName: "0.0.0",
+  octiVersionName: "1.0.0",
   octiGitSha: "dev",
   deviceManufacturer: "Mozilla",
   deviceName: "Firefox 134",
   deviceType: "BROWSER",
-  deviceBootedAt: null,
-  androidVersionName: null,
-  androidApiLevel: null,
-  androidSecurityPatch: null,
   osType: "linux",
   osVersionName: "6.8",
 };
@@ -37,8 +37,24 @@ describe("MetaInfo wire format", () => {
     expect(json.deviceId).toEqual({ id: sample.deviceId.id });
   });
 
-  it("uses BROWSER as the deviceType for web clients", () => {
+  it("uses BROWSER as deviceType", () => {
+    // Android added BROWSER + a fallback DeviceTypeSerializer in a44fc7a, so
+    // older clients fall back to UNKNOWN instead of strict-failing.
     expect(sample.deviceType).toBe("BROWSER");
+  });
+
+  it("drops null-valued fields on the wire (Android strict-decoder compat)", () => {
+    const withNulls: MetaInfo = {
+      ...sample,
+      deviceBootedAt: null,
+      androidVersionName: null,
+      androidApiLevel: null,
+    };
+    const json = JSON.parse(new TextDecoder().decode(serializeMetaInfo(withNulls)));
+    expect("deviceBootedAt" in json).toBe(false);
+    expect("androidVersionName" in json).toBe(false);
+    expect("androidApiLevel" in json).toBe(false);
+    expect(json.osType).toBe("linux");
   });
 
   it("metaInfoLabel prefers user label, then deviceName, then fallback", () => {

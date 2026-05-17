@@ -7,6 +7,7 @@ import {
 import type { ServerAddress } from "../protocol/models";
 import type { CredentialRecord } from "../storage/credentials-repo";
 import { detectBrowserInfo } from "../util/browser-detect";
+import { OCTI_WEB_GIT_SHA, OCTI_WEB_VERSION } from "../version";
 
 /**
  * TS mirror of {@code eu.darken.octi.modules.meta.core.MetaInfo}. Wire shape is
@@ -37,14 +38,15 @@ export interface MetaInfo {
   osVersionName?: string | null;
 }
 
-// Version string we publish in MetaInfo.octiVersionName / Octi-Device-Version
-// header. Keep this in lockstep with package.json — there's no build step that
-// injects it for us, and we'd rather under-report than lie.
-export const OCTI_WEB_VERSION = "0.0.0";
-const OCTI_WEB_GIT_SHA = "dev"; // overwritten by build pipeline once we have one
-
 export function serializeMetaInfo(info: MetaInfo): Uint8Array {
-  return new TextEncoder().encode(JSON.stringify(info));
+  // Drop null-valued fields so they're absent on the wire. Android's
+  // kotlinx.serialization config doesn't set `coerceInputValues = true`, so
+  // explicit nulls trip the strict decoder for fields with non-nullable custom
+  // serializers (notably `deviceBootedAt: Instant?` via InstantSerializer).
+  // Absent → uses the Kotlin-side default (null), which is what we want.
+  return new TextEncoder().encode(
+    JSON.stringify(info, (_key, val) => (val === null ? undefined : val)),
+  );
 }
 
 export function deserializeMetaInfo(bytes: Uint8Array): MetaInfo {

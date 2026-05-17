@@ -2,6 +2,7 @@
   import { createOrJoinAccount } from "../protocol/octi-api";
   import { decodeLinkingData } from "../linking/linking-data";
   import { credentialsRepo, type CredentialRecord } from "../storage/credentials-repo";
+  import { OCTI_WEB_VERSION } from "../version";
 
   let pasted = $state("");
   let deviceLabel = $state("Browser");
@@ -23,7 +24,7 @@
       const account = await createOrJoinAccount({
         server: link.serverAddress,
         deviceId,
-        deviceTag: { version: "octi-web/0.0.0", label: deviceLabel.trim() || "Browser" },
+        deviceTag: { version: OCTI_WEB_VERSION, label: deviceLabel.trim() || "Browser" },
         shareCode: link.shareCode.code,
       });
       const record: CredentialRecord = {

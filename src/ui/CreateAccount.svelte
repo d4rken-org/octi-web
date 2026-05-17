@@ -3,6 +3,7 @@
   import { OFFICIAL_SERVERS, type ServerAddress } from "../protocol/models";
   import { generateAesGcmSivKeyset } from "../crypto/tink-keyset";
   import { credentialsRepo, type CredentialRecord } from "../storage/credentials-repo";
+  import { OCTI_WEB_VERSION } from "../version";
 
   type Choice = "PROD" | "BETA" | "CUSTOM";
 
@@ -43,7 +44,7 @@
       const account = await createOrJoinAccount({
         server,
         deviceId,
-        deviceTag: { version: "octi-web/0.0.0", label: deviceLabel.trim() },
+        deviceTag: { version: OCTI_WEB_VERSION, label: deviceLabel.trim() },
       });
       const record: CredentialRecord = {
         accountId: account.account,

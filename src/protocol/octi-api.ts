@@ -6,6 +6,7 @@ import type {
   ShareCodeResponse,
 } from "./models";
 import { serverBaseUrl } from "./models";
+import { OCTI_WEB_VERSION } from "../version";
 
 /**
  * Thin typed wrappers over the sync-server REST API. Header conventions match
@@ -43,13 +44,22 @@ export class OctiApiError extends Error {
   }
 }
 
+/**
+ * Headers sent on every Octi API call. Mirrors Android's `DeviceHeaderInterceptor`
+ * + `BasicAuthInterceptor`: the server uses `Octi-Device-Version` (line ~110 of
+ * HttpExtensions.kt) to refresh the stored device record on every authed touch,
+ * so omitting it on routine calls leaves the server with a stale version and
+ * trips the "Incompatible encryption" / "Outdated version" checks on peer
+ * clients. Label is only sent when given (it's user-controlled, so we don't
+ * want to clobber a server-side change on every routine read).
+ */
 function deviceHeaders(deviceId: string, tag: DeviceTag | null): HeadersInit {
   const h: Record<string, string> = {
     "X-Device-ID": deviceId,
     "Octi-Device-Platform": PLATFORM,
+    "Octi-Device-Version": tag?.version ?? OCTI_WEB_VERSION,
   };
-  if (tag) {
-    h["Octi-Device-Version"] = tag.version;
+  if (tag?.label) {
     h["Octi-Device-Label"] = tag.label;
   }
   return h;
