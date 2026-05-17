@@ -54,7 +54,7 @@
       shareCode: link.shareCode.code,
     });
     const record: CredentialRecord = {
-      accountId: account.accountID,
+      accountId: account.account,
       devicePassword: account.password,
       ownDeviceId: deviceId,
       deviceLabel: deviceLabel.trim() || "Browser",

@@ -27,9 +27,14 @@ export const OFFICIAL_SERVERS: Record<"PROD" | "BETA", ServerAddress> = {
   BETA: { domain: "beta.kserver.octi.darken.eu", protocol: "https", port: 443 },
 };
 
-/** Response from {@code POST /v1/account}. */
+/**
+ * Response from {@code POST /v1/account}. Wire field is `account` (not
+ * `accountID`) — the server's {@code RegisterResponse} overrides the Kotlin
+ * property name via {@code @SerialName("account")}. Field type is a plain
+ * UUID string (contextual UUID serializer).
+ */
 export interface AccountCreateResponse {
-  accountID: string;
+  account: string;
   password: string;
 }
 

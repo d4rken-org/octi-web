@@ -46,7 +46,7 @@
         deviceTag: { version: "octi-web/0.0.0", label: deviceLabel.trim() },
       });
       const record: CredentialRecord = {
-        accountId: account.accountID,
+        accountId: account.account,
         devicePassword: account.password,
         ownDeviceId: deviceId,
         deviceLabel: deviceLabel.trim(),
