@@ -1,18 +1,17 @@
+import pkg from "../package.json";
+
 /**
  * The version string sent as `Octi-Device-Version` (HTTP header) and
  * `MetaInfo.octiVersionName` (encrypted module payload).
  *
- * Must be a plain `major.minor.patch` semver — Android's
- * {@link eu.darken.octi.sync.core.VersionCompat} parses by stripping at the
- * first `-`, splitting on `.`, and parsing each segment as an int. Anything
- * non-numeric (`octi-web/x`, build metadata, etc.) collapses to `[]` and is
- * treated as version 0.0.0, which trips the "Incompatible encryption" issue
- * because Android requires ≥ 1.0.0 for AES-GCM-SIV accounts.
+ * Format: `octi-web/<semver>`. The `octi-web/` prefix marks our independent
+ * release train so the Android peer doesn't apply its own version gates to
+ * us (post d4rken-org/octi#308 they're scoped to `platform == "android"`).
  *
- * Bump this when octi-web has its own release cadence; until then, "1.0.0"
- * accurately signals "we implement the modern crypto contract".
+ * Bump by editing `package.json`'s `version` field — both Vite's prod build
+ * and Vitest pick it up through TypeScript's resolveJsonModule.
  */
-export const OCTI_WEB_VERSION = "1.0.0";
+export const OCTI_WEB_VERSION: string = `octi-web/${pkg.version}`;
 
-/** Free-form git SHA placeholder until a real build pipeline injects one. */
+/** Placeholder until a real build pipeline injects a git SHA. */
 export const OCTI_WEB_GIT_SHA = "dev";
