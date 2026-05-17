@@ -11,6 +11,14 @@
     publishOwnMetaInfo,
     type MetaInfo,
   } from "../modules/meta";
+  import {
+    CLIPBOARD_MAX_BYTES,
+    fetchPeerClipboard,
+    publishOwnClipboard,
+    textClipboard,
+    type ClipboardInfo,
+  } from "../modules/clipboard";
+  import ClipboardCard from "./ClipboardCard.svelte";
   import ShareCode from "./ShareCode.svelte";
 
   let { record, onSignOut }: { record: CredentialRecord; onSignOut: () => void } = $props();
@@ -19,6 +27,8 @@
     raw: DeviceMetadata;
     meta: MetaInfo | null;
     metaError: string | null;
+    clipboard: ClipboardInfo | null;
+    clipboardError: string | null;
   }
 
   let devices = $state<EnrichedDevice[] | null>(null);
@@ -27,6 +37,10 @@
   let publishStatus = $state<"idle" | "publishing" | "done" | "error">("idle");
   let publishError = $state<string | null>(null);
   let showShare = $state(false);
+
+  let clipboardDraft = $state("");
+  let pushingClipboard = $state(false);
+  let clipboardPushStatus = $state<string | null>(null);
 
   const creds = {
     accountId: record.accountId,
@@ -40,25 +54,25 @@
     loadError = null;
     try {
       const list = await listDevices({ server: record.serverAddress, creds });
-      // Fetch peer MetaInfo in parallel. Each call independently swallows its
-      // own decrypt errors so one rotten device entry doesn't blank the list.
+      // Fetch peer MetaInfo + Clipboard in parallel per device. Each subcall isolates
+      // its own errors so one rotten payload doesn't blank the whole row.
       const enriched = await Promise.all(
         list.map(async (raw) => {
-          try {
-            const meta = await fetchPeerMetaInfo({
-              server: record.serverAddress,
-              creds,
-              crypti,
-              peerDeviceId: raw.id,
-            });
-            return { raw, meta, metaError: null } satisfies EnrichedDevice;
-          } catch (e) {
-            return {
-              raw,
-              meta: null,
-              metaError: e instanceof Error ? e.message : String(e),
-            } satisfies EnrichedDevice;
-          }
+          const [metaRes, clipRes] = await Promise.all([
+            fetchPeerMetaInfo({ server: record.serverAddress, creds, crypti, peerDeviceId: raw.id })
+              .then((meta) => ({ meta, metaError: null as string | null }))
+              .catch((e) => ({
+                meta: null as MetaInfo | null,
+                metaError: e instanceof Error ? e.message : String(e),
+              })),
+            fetchPeerClipboard({ server: record.serverAddress, creds, crypti, peerDeviceId: raw.id })
+              .then((clipboard) => ({ clipboard, clipboardError: null as string | null }))
+              .catch((e) => ({
+                clipboard: null as ClipboardInfo | null,
+                clipboardError: e instanceof Error ? e.message : String(e),
+              })),
+          ]);
+          return { raw, ...metaRes, ...clipRes } satisfies EnrichedDevice;
         }),
       );
       devices = enriched;
@@ -85,6 +99,37 @@
     }
   }
 
+  async function shareClipboard() {
+    clipboardPushStatus = null;
+    pushingClipboard = true;
+    try {
+      const info = textClipboard(clipboardDraft);
+      await publishOwnClipboard({
+        server: record.serverAddress,
+        creds,
+        crypti,
+        ownDeviceId: record.ownDeviceId,
+        info,
+      });
+      clipboardPushStatus = "Shared. Other devices will see it on their next sync.";
+      // Soft refresh so this device's clipboard card updates too.
+      void refresh();
+    } catch (e) {
+      clipboardPushStatus = `Failed: ${e instanceof Error ? e.message : String(e)}`;
+    } finally {
+      pushingClipboard = false;
+    }
+  }
+
+  async function pasteFromOsClipboard() {
+    try {
+      const text = await navigator.clipboard.readText();
+      clipboardDraft = text;
+    } catch (e) {
+      clipboardPushStatus = `Read failed: ${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
+
   async function signOut() {
     if (
       !confirm(
@@ -99,19 +144,15 @@
   }
 
   onMount(async () => {
-    // Publish our own MetaInfo first so we appear with a label in the list, then
-    // load the device list. Failures of either step are non-fatal to the other.
     await publishOwn();
     await refresh();
   });
 </script>
 
 <section>
-  <h1>Dashboard (M4 stub)</h1>
+  <h1>Dashboard (M5 stub)</h1>
   <p style="opacity: 0.75; font-size: 0.9rem;">
-    M5–M7 will fill this in with clipboard cards, file list, and upload UI. The
-    device list below is enriched with each device's MetaModule payload so
-    labels and platforms match what's shown on your phone.
+    Clipboard sharing is live; file upload and the poll loop come in M6/M7.
   </p>
 
   <h2>This device</h2>
@@ -129,7 +170,7 @@
 
   <div style="display: flex; gap: 0.5rem; margin: 1rem 0; flex-wrap: wrap;">
     <button onclick={refresh} disabled={loading}>
-      {loading ? "Loading…" : "Refresh device list"}
+      {loading ? "Loading…" : "Refresh"}
     </button>
     <button onclick={publishOwn} disabled={publishStatus === "publishing"}>
       {publishStatus === "publishing" ? "Publishing…" : "Republish my MetaInfo"}
@@ -148,14 +189,33 @@
     <p style="color: #ff8a8a;">{loadError}</p>
   {/if}
 
+  <h2>Share my clipboard</h2>
+  <p style="opacity: 0.7; font-size: 0.85rem; margin-top: 0;">
+    Manual share — type or paste, then hit "Share". Max {CLIPBOARD_MAX_BYTES / 1024} KiB.
+  </p>
+  <textarea
+    bind:value={clipboardDraft}
+    rows="3"
+    placeholder="Paste or type here…"
+  ></textarea>
+  <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
+    <button onclick={shareClipboard} disabled={pushingClipboard || clipboardDraft.length === 0}>
+      {pushingClipboard ? "Sharing…" : "Share"}
+    </button>
+    <button onclick={pasteFromOsClipboard}>Paste from OS clipboard</button>
+  </div>
+  {#if clipboardPushStatus}
+    <p style="opacity: 0.85; font-size: 0.85rem;">{clipboardPushStatus}</p>
+  {/if}
+
   {#if devices}
     <h2>Devices ({devices.length})</h2>
-    <ul style="list-style: none; padding: 0;">
+    <ul style="list-style: none; padding: 0; display: grid; gap: 0.5rem;">
       {#each devices as d (d.raw.id)}
         {@const isSelf = d.raw.id === record.ownDeviceId}
         {@const label = metaInfoLabel(d.meta, d.raw.label ?? "(no label)")}
         <li
-          style="padding: 0.6rem 0.75rem; border: 1px solid rgba(255,255,255,0.12); border-radius: 6px; margin-bottom: 0.4rem;"
+          style="padding: 0.6rem 0.75rem; border: 1px solid rgba(255,255,255,0.12); border-radius: 6px;"
         >
           <strong>{label}</strong>
           {#if isSelf}<span style="opacity: 0.6;"> · this device</span>{/if}
@@ -174,6 +234,9 @@
           {/if}
           <div style="opacity: 0.5; font-size: 0.8rem;">
             id: <code>{d.raw.id}</code> · last seen: {d.raw.lastSeen ?? "?"}
+          </div>
+          <div style="margin-top: 0.5rem;">
+            <ClipboardCard deviceLabel={label} info={d.clipboard} fetchError={d.clipboardError} />
           </div>
         </li>
       {/each}
