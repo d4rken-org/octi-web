@@ -18,7 +18,14 @@
     textClipboard,
     type ClipboardInfo,
   } from "../modules/clipboard";
+  import {
+    fetchPeerFileShareInfo,
+    type FileRow,
+    type FileShareInfo,
+  } from "../modules/files";
+  import { createBlobCipher, type BlobCipher } from "../crypto/blob-cipher";
   import ClipboardCard from "./ClipboardCard.svelte";
+  import Files from "./Files.svelte";
   import ShareCode from "./ShareCode.svelte";
 
   let { record, onSignOut }: { record: CredentialRecord; onSignOut: () => void } = $props();
@@ -29,9 +36,12 @@
     metaError: string | null;
     clipboard: ClipboardInfo | null;
     clipboardError: string | null;
+    fileShare: FileShareInfo | null;
+    fileShareError: string | null;
   }
 
   let devices = $state<EnrichedDevice[] | null>(null);
+  let blobCipher = $state<BlobCipher | null>(null);
   let loadError = $state<string | null>(null);
   let loading = $state(false);
   let publishStatus = $state<"idle" | "publishing" | "done" | "error">("idle");
@@ -49,6 +59,18 @@
   };
   const crypti = createPayloadEncryption(record.encryptionKeyset);
 
+  const fileRows = $derived(
+    (devices ?? []).flatMap((d) => {
+      if (!d.fileShare) return [] as FileRow[];
+      const ownerLabel = metaInfoLabel(d.meta, d.raw.label ?? "(no label)");
+      return d.fileShare.files.map((file) => ({
+        ownerDeviceId: d.raw.id,
+        ownerLabel,
+        file,
+      }) satisfies FileRow);
+    }),
+  );
+
   async function refresh() {
     loading = true;
     loadError = null;
@@ -58,7 +80,7 @@
       // its own errors so one rotten payload doesn't blank the whole row.
       const enriched = await Promise.all(
         list.map(async (raw) => {
-          const [metaRes, clipRes] = await Promise.all([
+          const [metaRes, clipRes, filesRes] = await Promise.all([
             fetchPeerMetaInfo({ server: record.serverAddress, creds, crypti, peerDeviceId: raw.id })
               .then((meta) => ({ meta, metaError: null as string | null }))
               .catch((e) => ({
@@ -71,8 +93,14 @@
                 clipboard: null as ClipboardInfo | null,
                 clipboardError: e instanceof Error ? e.message : String(e),
               })),
+            fetchPeerFileShareInfo({ server: record.serverAddress, creds, crypti, peerDeviceId: raw.id })
+              .then((fileShare) => ({ fileShare, fileShareError: null as string | null }))
+              .catch((e) => ({
+                fileShare: null as FileShareInfo | null,
+                fileShareError: e instanceof Error ? e.message : String(e),
+              })),
           ]);
-          return { raw, ...metaRes, ...clipRes } satisfies EnrichedDevice;
+          return { raw, ...metaRes, ...clipRes, ...filesRes } satisfies EnrichedDevice;
         }),
       );
       devices = enriched;
@@ -144,6 +172,7 @@
   }
 
   onMount(async () => {
+    blobCipher = await createBlobCipher(record.encryptionKeyset);
     await publishOwn();
     await refresh();
   });
@@ -241,6 +270,17 @@
         </li>
       {/each}
     </ul>
+  {/if}
+
+  {#if blobCipher}
+    <Files
+      {record}
+      {creds}
+      {crypti}
+      blobCipher={blobCipher}
+      rows={fileRows}
+      onAfterChange={refresh}
+    />
   {/if}
 
   {#if showShare}

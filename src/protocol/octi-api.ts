@@ -162,6 +162,21 @@ export async function readModulePayload(args: {
   targetDeviceId: string;
   moduleId: string;
 }): Promise<Uint8Array | null> {
+  const result = await readModulePayloadWithEtag(args);
+  return result?.bytes ?? null;
+}
+
+/**
+ * As {@link readModulePayload} but also returns the strong ETag the server
+ * advertised. Used by callers that intend to {@link commitModule} an updated
+ * version of this module — they pass the etag back in `If-Match`.
+ */
+export async function readModulePayloadWithEtag(args: {
+  server: ServerAddress;
+  creds: AuthCreds;
+  targetDeviceId: string;
+  moduleId: string;
+}): Promise<{ bytes: Uint8Array; etag: string | null } | null> {
   const url = moduleUrl(args.server, args.moduleId, args.targetDeviceId);
   const res = await fetch(url, {
     method: "GET",
@@ -176,7 +191,71 @@ export async function readModulePayload(args: {
   }
   const buf = await res.arrayBuffer();
   if (buf.byteLength === 0) return null;
-  return new Uint8Array(buf);
+  return { bytes: new Uint8Array(buf), etag: res.headers.get("ETag") };
+}
+
+/**
+ * {@code PUT /v1/module/{moduleId}?device-id={target}} (authed, blob-aware commit).
+ *
+ * This is the modern write path: the server atomically installs the encrypted
+ * document AND links it to a list of finalized blobs (`blobRefs`). For modules
+ * that reference uploaded blobs (FileShare), this is the only correct write —
+ * the legacy `POST` doesn't link blobs, so referenced blobs age out after the
+ * complete-state TTL (10 min default) and downloads return 404.
+ *
+ * Precondition headers:
+ *   - First write for this module instance: pass `ifNoneMatchStar: true`
+ *     → server sends `If-None-Match: *` semantics, rejects with 412 if a
+ *       module already exists.
+ *   - Updating an existing module: pass `ifMatch: <etag>` from the read
+ *     response → server returns 412 if anyone else committed in the meantime.
+ *
+ * Returns the server's new ETag so the caller can stash it for subsequent
+ * commits.
+ */
+export async function commitModule(args: {
+  server: ServerAddress;
+  creds: AuthCreds;
+  targetDeviceId: string;
+  moduleId: string;
+  documentBytes: Uint8Array;
+  blobIds: string[];
+  ifMatch?: string;
+  ifNoneMatchStar?: boolean;
+}): Promise<{ etag: string }> {
+  if ((args.ifMatch && args.ifNoneMatchStar) || (!args.ifMatch && !args.ifNoneMatchStar)) {
+    throw new Error("commitModule: pass exactly one of ifMatch or ifNoneMatchStar");
+  }
+  const headers: Record<string, string> = {
+    ...(deviceHeaders(args.creds.deviceId, null) as Record<string, string>),
+    Authorization: basicAuthHeader(args.creds.accountId, args.creds.devicePassword),
+    "Content-Type": "application/json",
+  };
+  if (args.ifMatch) {
+    headers["If-Match"] = args.ifMatch;
+  } else if (args.ifNoneMatchStar) {
+    headers["If-None-Match"] = "*";
+  }
+  const body = JSON.stringify({
+    documentBase64: bytesToBase64(args.documentBytes),
+    blobRefs: args.blobIds.map((blobId) => ({ blobId })),
+  });
+  const res = await fetch(moduleUrl(args.server, args.moduleId, args.targetDeviceId), {
+    method: "PUT",
+    headers,
+    body,
+  });
+  if (!res.ok) {
+    throw new OctiApiError(res.status, `module/${args.moduleId} (PUT)`, await res.text().catch(() => ""));
+  }
+  const parsed = (await res.json()) as { etag: string };
+  return { etag: parsed.etag };
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let s = "";
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return btoa(s);
 }
 
 /**
