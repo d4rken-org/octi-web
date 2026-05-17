@@ -264,3 +264,133 @@ export function readTinkAeadPrefix(bytes: Uint8Array, expectedKeyId: number): vo
 }
 
 export const TINK_AEAD_PREFIX_LEN = TINK_AEAD_PREFIX_SIZE;
+
+// =============================================================================
+// Writer (serializer) — emits the same wire shape we read, so a freshly-minted
+// keyset round-trips through parseTinkKeyset and is interoperable with Android.
+// =============================================================================
+
+class Writer {
+  private chunks: number[] = [];
+
+  varint(n: number): void {
+    let v = n >>> 0;
+    while (v > 0x7f) {
+      this.chunks.push((v & 0x7f) | 0x80);
+      v >>>= 7;
+    }
+    this.chunks.push(v & 0x7f);
+  }
+
+  tag(fieldNum: number, wireType: number): void {
+    this.varint((fieldNum << 3) | wireType);
+  }
+
+  lenDelim(bytes: Uint8Array): void {
+    this.varint(bytes.length);
+    for (let i = 0; i < bytes.length; i++) this.chunks.push(bytes[i]);
+  }
+
+  toBytes(): Uint8Array {
+    return new Uint8Array(this.chunks);
+  }
+}
+
+function encodeAesGcmSivKey(key32: Uint8Array): Uint8Array {
+  if (key32.length !== 32) throw new Error("encodeAesGcmSivKey: key must be 32 bytes");
+  // Field number for key_value is 3 in the tink-android 1.16.0 wire (see decodeAesGcmSivKey
+  // comment for the upstream-mismatch note). Stay consistent with the reader.
+  const w = new Writer();
+  w.tag(3, 2);
+  w.lenDelim(key32);
+  return w.toBytes();
+}
+
+function encodeKeyData(key32: Uint8Array): Uint8Array {
+  const w = new Writer();
+  // field 1: type_url
+  w.tag(1, 2);
+  w.lenDelim(new TextEncoder().encode(AES_GCM_SIV_TYPE_URL));
+  // field 2: value (serialized AesGcmSivKey)
+  w.tag(2, 2);
+  w.lenDelim(encodeAesGcmSivKey(key32));
+  // field 3: key_material_type = SYMMETRIC (1)
+  w.tag(3, 0);
+  w.varint(1);
+  return w.toBytes();
+}
+
+function encodeKey(keyId: number, key32: Uint8Array): Uint8Array {
+  const w = new Writer();
+  // field 1: key_data
+  w.tag(1, 2);
+  w.lenDelim(encodeKeyData(key32));
+  // field 2: status = ENABLED (1)
+  w.tag(2, 0);
+  w.varint(1);
+  // field 3: key_id
+  w.tag(3, 0);
+  w.varint(keyId);
+  // field 4: output_prefix_type = TINK (1)
+  w.tag(4, 0);
+  w.varint(1);
+  return w.toBytes();
+}
+
+/**
+ * Serialize a `TinkKeyset` back to the proto bytes the Android client expects
+ * (same shape `TinkProtoKeysetFormat.serializeKeyset` emits). Used both for
+ * freshly-generated keysets and to round-trip parsed ones.
+ *
+ * Restriction: only single-key, AES-256-GCM-SIV, TINK-prefix keysets are
+ * supported — the only shape the web client mints and the only shape it accepts
+ * from a linked Android device.
+ */
+export function serializeTinkKeyset(keyset: TinkKeyset): Uint8Array {
+  if (keyset.keys.length !== 1) {
+    throw new Error("serializeTinkKeyset: only single-key keysets are supported");
+  }
+  const key = keyset.keys[0];
+  if (key.outputPrefix !== "TINK") {
+    throw new Error(`serializeTinkKeyset: unsupported output prefix "${key.outputPrefix}"`);
+  }
+  if (key.keyBytes.length !== 32) {
+    throw new Error(`serializeTinkKeyset: AES-256 key must be 32 bytes, got ${key.keyBytes.length}`);
+  }
+  if (key.keyId !== keyset.primaryKeyId) {
+    throw new Error(
+      `serializeTinkKeyset: single-key keyset's key_id (${key.keyId}) must equal primary_key_id (${keyset.primaryKeyId})`,
+    );
+  }
+  const w = new Writer();
+  // field 1: primary_key_id
+  w.tag(1, 0);
+  w.varint(keyset.primaryKeyId);
+  // field 2: Key
+  w.tag(2, 2);
+  w.lenDelim(encodeKey(key.keyId, key.keyBytes));
+  return w.toBytes();
+}
+
+/**
+ * Generate a fresh AES-256-GCM-SIV keyset for a brand-new account. Returns both
+ * the in-memory parsed form (handy for immediate use) and the wire bytes
+ * (which is what goes into LinkingData / persistence).
+ */
+export function generateAesGcmSivKeyset(): { keyset: TinkKeyset; bytes: Uint8Array } {
+  const key32 = new Uint8Array(32);
+  crypto.getRandomValues(key32);
+  // Tink uses random non-zero uint32 key IDs. Generate 4 random bytes and
+  // resample until non-zero (vanishingly unlikely loop but defensive).
+  let keyId = 0;
+  const idBuf = new Uint8Array(4);
+  while (keyId === 0) {
+    crypto.getRandomValues(idBuf);
+    keyId = ((idBuf[0] << 24) | (idBuf[1] << 16) | (idBuf[2] << 8) | idBuf[3]) >>> 0;
+  }
+  const keyset: TinkKeyset = {
+    primaryKeyId: keyId,
+    keys: [{ keyId, outputPrefix: "TINK", keyBytes: key32 }],
+  };
+  return { keyset, bytes: serializeTinkKeyset(keyset) };
+}
