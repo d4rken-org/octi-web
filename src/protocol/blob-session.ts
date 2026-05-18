@@ -1,4 +1,4 @@
-import { OctiApiError, type AuthCreds } from "./octi-api";
+import { OctiApiError, OCTI_WEB_CAPABILITIES_HEADER, type AuthCreds } from "./octi-api";
 import { type ServerAddress, serverBaseUrl } from "./models";
 
 /**
@@ -66,6 +66,7 @@ function baseHeaders(creds: AuthCreds, version: string): HeadersInit {
     "X-Device-ID": creds.deviceId,
     "Octi-Device-Platform": "web",
     "Octi-Device-Version": version,
+    "Octi-Device-Capabilities": OCTI_WEB_CAPABILITIES_HEADER,
   };
 }
 

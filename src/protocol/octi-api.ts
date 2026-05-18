@@ -20,6 +20,30 @@ import { OCTI_WEB_VERSION } from "../version";
 
 const PLATFORM = "web";
 
+/**
+ * Per-device capability tags we declare to the server / peers. Format and rules
+ * mirror `Capability` / `CapabilitiesCodec` in the Android client (octi#309) and
+ * `parseCapabilitiesHeader` in the sync-server (octi-server#23): each tag is
+ * `<namespace>:<value>`, the `<namespace>:_reported` marker says "this device
+ * authoritatively reports its capabilities in this namespace" (a peer that
+ * omits it falls back to the per-platform grace heuristic), and the array is
+ * canonically sorted on the wire.
+ *
+ * For octi-web we only ship AES-256-GCM-SIV — everything else is unsupported
+ * and we declare so explicitly. Once the server PR lands and Android peers see
+ * our authoritative tag set, the "Incompatible encryption" / "Outdated version"
+ * false positives on web peer cards stop firing regardless of app version.
+ *
+ * Forward compatibility: the header is silently dropped by servers that pre-date
+ * octi-server#23, so it's safe to send unconditionally.
+ */
+export const OCTI_WEB_CAPABILITIES: readonly string[] = Object.freeze(
+  ["encryption:AES256_GCM_SIV", "encryption:_reported"].sort(),
+);
+
+/** Serialized form sent in the `Octi-Device-Capabilities` HTTP header. */
+export const OCTI_WEB_CAPABILITIES_HEADER = JSON.stringify(OCTI_WEB_CAPABILITIES);
+
 export interface DeviceTag {
   /** App version string. Used for `Octi-Device-Version` header. */
   version: string;
@@ -58,6 +82,7 @@ function deviceHeaders(deviceId: string, tag: DeviceTag | null): HeadersInit {
     "X-Device-ID": deviceId,
     "Octi-Device-Platform": PLATFORM,
     "Octi-Device-Version": tag?.version ?? OCTI_WEB_VERSION,
+    "Octi-Device-Capabilities": OCTI_WEB_CAPABILITIES_HEADER,
   };
   if (tag?.label) {
     h["Octi-Device-Label"] = tag.label;
