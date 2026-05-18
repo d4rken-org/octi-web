@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
 
   import { listDevices, OctiApiError } from "../protocol/octi-api";
+  import { startPollLoop } from "../sync/poll-loop";
   import type { DeviceMetadata } from "../protocol/models";
   import { credentialsRepo, type CredentialRecord } from "../storage/credentials-repo";
   import { createPayloadEncryption } from "../crypto/payload";
@@ -44,9 +45,12 @@
   let blobCipher = $state<BlobCipher | null>(null);
   let loadError = $state<string | null>(null);
   let loading = $state(false);
+  /** Most recent successful refresh. Used by the "last synced" hint. */
+  let lastSyncedAt = $state<Date | null>(null);
   let publishStatus = $state<"idle" | "publishing" | "done" | "error">("idle");
   let publishError = $state<string | null>(null);
   let showShare = $state(false);
+  let stopPollLoop: (() => void) | null = null;
 
   let clipboardDraft = $state("");
   let pushingClipboard = $state(false);
@@ -104,6 +108,7 @@
         }),
       );
       devices = enriched;
+      lastSyncedAt = new Date();
     } catch (e) {
       if (e instanceof OctiApiError) {
         loadError = `${e.path} → ${e.status}: ${e.body.slice(0, 200)}`;
@@ -174,40 +179,60 @@
   onMount(async () => {
     blobCipher = await createBlobCipher(record.encryptionKeyset);
     await publishOwn();
-    await refresh();
+    // Poll loop drives refresh; refreshOnStart fires it immediately.
+    stopPollLoop = startPollLoop(refresh);
   });
+
+  onDestroy(() => {
+    stopPollLoop?.();
+    stopPollLoop = null;
+  });
+
+  /** "5 s", "12 min", "2 h", etc. — coarse, human-friendly. */
+  function timeAgo(d: Date | null): string {
+    if (!d) return "never";
+    const secs = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
+    if (secs < 5) return "just now";
+    if (secs < 60) return `${secs} s ago`;
+    if (secs < 3600) return `${Math.floor(secs / 60)} min ago`;
+    if (secs < 86400) return `${Math.floor(secs / 3600)} h ago`;
+    return `${Math.floor(secs / 86400)} d ago`;
+  }
+
+  // Re-render the "last synced" hint on a 1 s interval so it stays accurate
+  // between polls. Just bumps a state var — cheap.
+  let now = $state(Date.now());
+  $effect(() => {
+    const i = setInterval(() => (now = Date.now()), 1000);
+    return () => clearInterval(i);
+  });
+  // Touch `now` so the derived label re-evaluates.
+  const lastSyncedLabel = $derived((void now, timeAgo(lastSyncedAt)));
 </script>
 
 <section>
-  <h1>Dashboard (M5 stub)</h1>
-  <p style="opacity: 0.75; font-size: 0.9rem;">
-    Clipboard sharing is live; file upload and the poll loop come in M6/M7.
-  </p>
+  <header style="display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap;">
+    <h1 style="margin: 0;">Octi web</h1>
+    <span style="opacity: 0.65; font-size: 0.85rem;">
+      Signed in as {record.deviceLabel || "Browser"} ·
+      {record.serverAddress.protocol}://{record.serverAddress.domain}:{record.serverAddress.port}
+    </span>
+    <span style="margin-left: auto; opacity: 0.7; font-size: 0.85rem;">
+      {loading ? "Syncing…" : `Last sync: ${lastSyncedLabel}`}
+    </span>
+  </header>
 
-  <h2>This device</h2>
-  <pre>{JSON.stringify(
-      {
-        accountId: record.accountId,
-        ownDeviceId: record.ownDeviceId,
-        deviceLabel: record.deviceLabel,
-        serverAddress: record.serverAddress,
-        encryptionKeyset: `<${record.encryptionKeyset.byteLength} bytes>`,
-      },
-      null,
-      2,
-    )}</pre>
-
-  <div style="display: flex; gap: 0.5rem; margin: 1rem 0; flex-wrap: wrap;">
+  <div style="display: flex; gap: 0.5rem; margin: 0.75rem 0 1rem; flex-wrap: wrap;">
     <button onclick={refresh} disabled={loading}>
-      {loading ? "Loading…" : "Refresh"}
+      {loading ? "Refreshing…" : "Refresh now"}
     </button>
     <button onclick={publishOwn} disabled={publishStatus === "publishing"}>
       {publishStatus === "publishing" ? "Publishing…" : "Republish my MetaInfo"}
     </button>
     <button onclick={() => (showShare = !showShare)}>
-      {showShare ? "Hide share code" : "Generate share code"}
+      {showShare ? "Hide share code" : "Add another device"}
     </button>
-    <button onclick={signOut}>Sign out (wipe)</button>
+    <button onclick={signOut} style="margin-left: auto;">Sign out</button>
   </div>
 
   {#if publishStatus === "error" && publishError}
