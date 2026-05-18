@@ -4,3 +4,6 @@ dist
 .svelte-kit
 *.log
 .DS_Store
+.claude/
+.idea/
+.vscode/
