@@ -11,7 +11,7 @@
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:smoke": "vitest run --dir src/__smoke__"
+    "test:smoke": "vitest run src/__smoke__/smoke.test.ts"
   },
   "dependencies": {
     "@noble/ciphers": "1.1.3",
