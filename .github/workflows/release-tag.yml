@@ -1,0 +1,202 @@
+name: Tagged releases
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  validate-tag:
+    name: Validate tag
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check tag-name format
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Allow vM.m.p as well (suffix-free, reserved for future "stable" releases) —
+          # the prerelease format vM.m.p-(rc|beta)N is the only one bump.sh currently
+          # emits, but accepting both makes :latest Docker promotion sensible.
+          if [[ ! "${REF_NAME}" =~ ^v[0-9]{1,2}\.[0-9]{1,2}\.[0-9]{1,2}(-(rc|beta)[0-9]{1,2})?$ ]]; then
+            echo "Tag '${REF_NAME}' does not match vM.m.p or vM.m.p-(rc|beta)N" >&2
+            echo "Releases must be cut via the 'Release prepare' workflow." >&2
+            exit 1
+          fi
+
+      - name: Checkout source code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify tag commit is on main
+        run: |
+          set -euo pipefail
+          git fetch origin main --no-tags
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::Tag commit is not reachable from origin/main. Tags must come from main." >&2
+            exit 1
+          fi
+
+      - name: Setup environment
+        uses: ./.github/actions/common-setup
+
+      - name: Verify package.json#version matches tag
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag_name="${REF_NAME#v}"
+          parsed=$(./tools/release/bump.sh --mode=check)
+          current_name=$(echo "$parsed" | grep -E '^current_name=' | cut -d= -f2)
+          if [[ "$current_name" != "$tag_name" ]]; then
+            echo "Tag '${REF_NAME}' does not match package.json#version '$current_name'" >&2
+            echo "package.json must equal the tag — releases must be cut via 'Release prepare'." >&2
+            exit 1
+          fi
+
+  release-github:
+    needs: validate-tag
+    name: Create GitHub release
+    permissions:
+      contents: write
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup environment
+        uses: ./.github/actions/common-setup
+
+      - name: Build production bundle
+        run: pnpm build
+
+      - name: Package dist tarball
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          tar -czf "octi-web-${REF_NAME}.tar.gz" -C dist .
+          ls -la "octi-web-${REF_NAME}.tar.gz"
+
+      - name: Create pre-release (rc/beta)
+        if: contains(github.ref_name, '-')
+        uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v3.0.0
+        with:
+          prerelease: true
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: octi-web-*.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create stable release (suffix-free)
+        if: ${{ !contains(github.ref_name, '-') }}
+        uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v3.0.0
+        with:
+          prerelease: false
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: octi-web-*.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  release-pages:
+    needs: validate-tag
+    name: Deploy to GitHub Pages
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup environment
+        uses: ./.github/actions/common-setup
+
+      - name: Build production bundle
+        run: pnpm build
+
+      - name: Configure Pages
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
+        with:
+          path: dist/
+
+      - name: Deploy to Pages
+        id: deploy
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
+
+  release-docker:
+    needs: validate-tag
+    name: Publish Docker image (ghcr.io)
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3.6.1
+
+      # `:latest` only on suffix-free tags (vM.m.p) — RCs and betas don't become
+      # the default. Today bump.sh always emits a suffix; this is forward-compat
+      # for when we cut a stable 1.0.0.
+      - name: Compute Docker tags
+        id: tags
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          tags=("ghcr.io/${{ github.repository }}:${REF_NAME}")
+          if [[ ! "${REF_NAME}" == *-* ]]; then
+            tags+=("ghcr.io/${{ github.repository }}:latest")
+          fi
+          printf '%s\n' "${tags[@]}"
+          # Join with newlines for docker/build-push-action's tags input.
+          {
+            echo "list<<EOF"
+            printf '%s\n' "${tags[@]}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6.9.0
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.tags.outputs.list }}
+          platforms: linux/amd64,linux/arm64
