@@ -34,8 +34,11 @@
 
 <header class="nav">
   <div class="identity">
-    <h1 class="title">Octi web</h1>
-    <div class="subtitle">{accountSubtitle}</div>
+    <img class="brand-icon" src="/icons/octi-192.png" width="36" height="36" alt="" />
+    <div class="identity-text">
+      <h1 class="title">Octi Web</h1>
+      <div class="subtitle">{accountSubtitle}</div>
+    </div>
   </div>
   <div class="pills">
     <span class="pill" title="octi-web version">v{version}</span>
@@ -90,6 +93,17 @@
 
   .identity {
     grid-area: identity;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .brand-icon {
+    flex-shrink: 0;
+    border-radius: 8px;
+    display: block;
+  }
+  .identity-text {
     min-width: 0;
   }
   .title {
