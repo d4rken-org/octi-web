@@ -96,7 +96,8 @@ pnpm build        # production bundle in dist/
 pnpm preview      # serve dist/ locally
 ```
 
-Release pipeline + cut procedure: [`RELEASE.md`](RELEASE.md).
+Releases are cut via the **Release prepare** workflow in the Actions tab — see its input
+descriptions for the dispatch UX.
 
 ## License
 
