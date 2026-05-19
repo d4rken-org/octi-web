@@ -299,12 +299,21 @@ export async function writeModulePayload(args: {
   targetDeviceId: string;
   moduleId: string;
   ciphertext: Uint8Array;
+  /**
+   * Optional device meta tag forwarded as headers on this authed write. When
+   * present, the server updates its stored {@link DeviceMetadata} (label +
+   * version + lastSeen) alongside the encrypted module payload — without it,
+   * a label change in {@link publishOwnMetaInfo} would only reach peers who
+   * decrypt the new MetaInfo, while peers reading the device-list response
+   * would still see the old label.
+   */
+  deviceTag?: DeviceTag;
 }): Promise<void> {
   const url = moduleUrl(args.server, args.moduleId, args.targetDeviceId);
   const res = await fetch(url, {
     method: "POST",
     headers: {
-      ...deviceHeaders(args.creds.deviceId, null),
+      ...deviceHeaders(args.creds.deviceId, args.deviceTag ?? null),
       Authorization: basicAuthHeader(args.creds.accountId, args.creds.devicePassword),
       "Content-Type": "application/octet-stream",
     },

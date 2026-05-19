@@ -13,5 +13,8 @@ import pkg from "../package.json";
  */
 export const OCTI_WEB_VERSION: string = `octi-web/${pkg.version}`;
 
+/** Bare semver without the `octi-web/` prefix — shown in nav UI pills etc. */
+export const OCTI_WEB_DISPLAY_VERSION: string = pkg.version;
+
 /** Placeholder until a real build pipeline injects a git SHA. */
 export const OCTI_WEB_GIT_SHA = "dev";

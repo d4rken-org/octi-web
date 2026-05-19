@@ -88,12 +88,20 @@ export async function publishOwnMetaInfo(args: {
   const plaintext = serializeMetaInfo(info);
   const ad = buildAssociatedData(args.record.ownDeviceId, META_MODULE_ID);
   const ciphertext = args.crypti.encrypt(plaintext, ad);
+  // Pass label + version so the server updates DeviceMetadata.label on this
+  // authed write. Without the label header, peers fetching /v1/devices would
+  // still see the previous label until they happened to decode the new
+  // (encrypted) MetaInfo payload.
   await writeModulePayload({
     server: args.server,
     creds: args.creds,
     targetDeviceId: args.record.ownDeviceId,
     moduleId: META_MODULE_ID,
     ciphertext,
+    deviceTag: {
+      version: OCTI_WEB_VERSION,
+      label: args.record.deviceLabel,
+    },
   });
 }
 

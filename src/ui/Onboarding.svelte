@@ -10,7 +10,7 @@
   let { onDone }: { onDone: () => void } = $props();
 </script>
 
-<section>
+<section class="route-narrow">
   {#if mode === "choose"}
     <h1>Welcome to Octi web</h1>
     <p style="opacity: 0.75;">

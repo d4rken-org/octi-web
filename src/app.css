@@ -4,6 +4,39 @@
   color-scheme: light dark;
   color: rgba(255, 255, 255, 0.87);
   background-color: #1f1f23;
+
+  /*
+   * Material-3-ish color roles for the per-device card + tile grid. Names
+   * follow Android M3 conventions so role assignments transfer 1:1 from the
+   * Android client's tile composables. Values are tuned for the existing
+   * octi-web palette (close to GitHub Dark) rather than a literal copy of
+   * Material You's dynamic-color output.
+   */
+  --md-color-primary: #8ab4f8;
+  --md-color-on-primary: #062e6f;
+  --md-color-primary-container: #2a4978;
+  --md-color-on-primary-container: #d6e2ff;
+
+  --md-color-tertiary: #f7c873;
+  --md-color-error: #f28b82;
+  --md-color-on-error: #410e0b;
+  --md-color-error-container: #5b1f1a;
+  --md-color-on-error-container: #f9dedc;
+
+  --md-color-surface: #1f1f23;
+  --md-color-on-surface: rgba(255, 255, 255, 0.87);
+  --md-color-on-surface-variant: rgba(255, 255, 255, 0.62);
+  --md-color-surface-container-low: #25252a;
+  --md-color-surface-container: #2a2a30;
+  --md-color-surface-container-high: #313138;
+  --md-color-surface-container-highest: #38383f;
+  --md-color-outline-variant: rgba(255, 255, 255, 0.12);
+
+  /* Shared dimensional tokens. */
+  --octi-card-radius: 12px;
+  --octi-tile-radius: 12px;
+  --octi-tile-padding: 16px;
+  --octi-tile-gap: 8px;
 }
 
 body {
@@ -12,9 +45,23 @@ body {
 }
 
 #app {
-  max-width: 960px;
   margin: 0 auto;
   padding: 1.5rem;
+}
+
+/*
+ * Route-level max-width: the dashboard widens to fit a multi-column grid of
+ * device cards, while onboarding stays at the original narrow size. Each
+ * route's top-level <section> picks one of these classes — `#app` itself is
+ * uncapped because a parent's max-width can't be widened by a child class.
+ */
+.route-narrow {
+  max-width: 960px;
+  margin: 0 auto;
+}
+.route-wide {
+  max-width: 1400px;
+  margin: 0 auto;
 }
 
 h1 {
@@ -87,6 +134,26 @@ pre {
   :root {
     color: #1f1f23;
     background-color: #f6f6f8;
+
+    --md-color-primary: #1a56db;
+    --md-color-on-primary: #ffffff;
+    --md-color-primary-container: #dbe6ff;
+    --md-color-on-primary-container: #0a2b6b;
+
+    --md-color-tertiary: #8a5a00;
+    --md-color-error: #b3261e;
+    --md-color-on-error: #ffffff;
+    --md-color-error-container: #f9dedc;
+    --md-color-on-error-container: #410e0b;
+
+    --md-color-surface: #f6f6f8;
+    --md-color-on-surface: #1f1f23;
+    --md-color-on-surface-variant: rgba(31, 31, 35, 0.62);
+    --md-color-surface-container-low: #efeff2;
+    --md-color-surface-container: #ebebef;
+    --md-color-surface-container-high: #e3e3e8;
+    --md-color-surface-container-highest: #dcdce2;
+    --md-color-outline-variant: rgba(0, 0, 0, 0.12);
   }
 
   button {

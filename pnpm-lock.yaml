@@ -36,6 +36,9 @@ importers:
       '@types/qrcode':
         specifier: 1.5.5
         version: 1.5.5
+      fake-indexeddb:
+        specifier: ^6.2.5
+        version: 6.2.5
       svelte:
         specifier: 5.16.0
         version: 5.16.0
@@ -669,6 +672,10 @@ packages:
   expect-type@1.3.0:
     resolution: {integrity: sha512-knvyeauYhqjOYvQ66MznSMs83wmHrCycNEN6Ao+2AeYEfxUIkuiVxdEa1qlGEPK+We3n0THiDciYSsCcgW/DoA==, tarball: https://registry.npmjs.org/expect-type/-/expect-type-1.3.0.tgz}
     engines: {node: '>=12.0.0'}
+
+  fake-indexeddb@6.2.5:
+    resolution: {integrity: sha512-CGnyrvbhPlWYMngksqrSSUT1BAVP49dZocrHuK0SvtR0D5TMs5wP0o3j7jexDJW01KSadjBp1M/71o/KR3nD1w==, tarball: https://registry.npmjs.org/fake-indexeddb/-/fake-indexeddb-6.2.5.tgz}
+    engines: {node: '>=18'}
 
   fdir@6.5.0:
     resolution: {integrity: sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg==, tarball: https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz}
@@ -1449,6 +1456,8 @@ snapshots:
       '@types/estree': 1.0.9
 
   expect-type@1.3.0: {}
+
+  fake-indexeddb@6.2.5: {}
 
   fdir@6.5.0: {}
 

@@ -8,12 +8,10 @@
   import { createPayloadEncryption } from "../crypto/payload";
   import {
     fetchPeerMetaInfo,
-    metaInfoLabel,
     publishOwnMetaInfo,
     type MetaInfo,
   } from "../modules/meta";
   import {
-    CLIPBOARD_MAX_BYTES,
     fetchPeerClipboard,
     publishOwnClipboard,
     textClipboard,
@@ -21,15 +19,58 @@
   } from "../modules/clipboard";
   import {
     fetchPeerFileShareInfo,
-    type FileRow,
     type FileShareInfo,
   } from "../modules/files";
   import { createBlobCipher, type BlobCipher } from "../crypto/blob-cipher";
-  import ClipboardCard from "./ClipboardCard.svelte";
-  import Files from "./Files.svelte";
+  import {
+    APPS_MODULE_ID,
+    decodeAppsInfo,
+    type AppsInfo,
+  } from "../modules/apps";
+  import {
+    CONNECTIVITY_MODULE_ID,
+    decodeConnectivityInfo,
+    type ConnectivityInfo,
+  } from "../modules/connectivity";
+  import {
+    POWER_MODULE_ID,
+    decodePowerInfo,
+    type PowerInfo,
+  } from "../modules/power";
+  import {
+    WIFI_MODULE_ID,
+    decodeWifiInfo,
+    type WifiInfo,
+  } from "../modules/wifi";
+  import { createEtagCache, fetchPeerModule } from "../modules/fetch-module";
+  import { tileLayoutRepo } from "../storage/tile-layout-repo";
+  import type { TileLayout } from "../modules/module-registry";
+  import {
+    connectorIdString,
+    downloadSharedFile,
+    uploadFile,
+    type SharedFile,
+  } from "../modules/files";
+  import { OCTI_WEB_DISPLAY_VERSION } from "../version";
+  import DeviceCard from "./dashboard/DeviceCard.svelte";
+  import NavBar from "./dashboard/NavBar.svelte";
+  import type { MenuItem } from "./dashboard/OverflowMenu.svelte";
+  import { sortDevicesSelfFirst } from "./dashboard/order";
+  import SettingsScreen from "./dashboard/SettingsScreen.svelte";
+  import Sheet from "./dashboard/Sheet.svelte";
   import ShareCode from "./ShareCode.svelte";
 
   let { record, onSignOut }: { record: CredentialRecord; onSignOut: () => void } = $props();
+
+  /**
+   * Mutable copy of the credential record used everywhere downstream. The
+   * `record` prop is the initial value; once Settings edits the device label
+   * (or any other mutable field in the future), it calls `onRecordUpdated`
+   * which updates this state. Nav subtitle, future `publishOwn()` calls, and
+   * any downstream consumer must read `activeRecord`, NOT the prop, to see
+   * the post-edit value.
+   */
+  let activeRecord = $state<CredentialRecord>(record);
 
   interface EnrichedDevice {
     raw: DeviceMetadata;
@@ -39,6 +80,14 @@
     clipboardError: string | null;
     fileShare: FileShareInfo | null;
     fileShareError: string | null;
+    power: PowerInfo | null;
+    powerError: string | null;
+    wifi: WifiInfo | null;
+    wifiError: string | null;
+    connectivity: ConnectivityInfo | null;
+    connectivityError: string | null;
+    apps: AppsInfo | null;
+    appsError: string | null;
   }
 
   let devices = $state<EnrichedDevice[] | null>(null);
@@ -49,12 +98,17 @@
   let lastSyncedAt = $state<Date | null>(null);
   let publishStatus = $state<"idle" | "publishing" | "done" | "error">("idle");
   let publishError = $state<string | null>(null);
-  let showShare = $state(false);
+  let showShareSheet = $state(false);
+  let showSettings = $state(false);
   let stopPollLoop: (() => void) | null = null;
 
-  let clipboardDraft = $state("");
-  let pushingClipboard = $state(false);
-  let clipboardPushStatus = $state<string | null>(null);
+  /**
+   * Per-device tile layout, keyed by deviceId. Populated incrementally by
+   * `ensureLayoutFor(deviceId, platform)` as devices appear in refresh()
+   * results. DeviceCard's `onLayoutChange` mutation persists through the repo
+   * and updates this map. A re-keyed update triggers Svelte's reactivity.
+   */
+  let tileLayouts = $state<Record<string, TileLayout>>({});
 
   const creds = {
     accountId: record.accountId,
@@ -62,61 +116,246 @@
     deviceId: record.ownDeviceId,
   };
   const crypti = createPayloadEncryption(record.encryptionKeyset);
+  const ownConnectorId = connectorIdString(record.serverAddress, record.accountId);
 
-  const fileRows = $derived(
-    (devices ?? []).flatMap((d) => {
-      if (!d.fileShare) return [] as FileRow[];
-      const ownerLabel = metaInfoLabel(d.meta, d.raw.label ?? "(no label)");
-      return d.fileShare.files.map((file) => ({
-        ownerDeviceId: d.raw.id,
-        ownerLabel,
+  /**
+   * Open a hidden file input from anywhere — used by the own-device FilesTile
+   * quick-action button (which doesn't have its own input element).
+   */
+  let hiddenFileInput = $state<HTMLInputElement | null>(null);
+  let uploadStatus = $state<string | null>(null);
+
+  function triggerHiddenFilePick() {
+    hiddenFileInput?.click();
+  }
+
+  async function onHiddenFilePicked(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      await runUpload(file);
+    } finally {
+      input.value = "";
+    }
+  }
+
+  async function runUpload(file: File, onProgress?: (done: number, total: number) => void) {
+    if (!blobCipher) throw new Error("Blob cipher not ready");
+    uploadStatus = `Uploading "${file.name}"…`;
+    try {
+      await uploadFile({
+        server: record.serverAddress,
+        creds,
+        crypti,
+        blobCipher,
+        record,
         file,
-      }) satisfies FileRow);
-    }),
-  );
+        onProgress,
+      });
+      uploadStatus = `Shared "${file.name}".`;
+      void refresh();
+    } catch (e) {
+      uploadStatus = `Upload failed: ${e instanceof Error ? e.message : String(e)}`;
+      throw e;
+    }
+  }
+
+  async function downloadFile(file: SharedFile, ownerDeviceId: string) {
+    if (!blobCipher) throw new Error("Blob cipher not ready");
+    const result = await downloadSharedFile({
+      server: record.serverAddress,
+      creds,
+      blobCipher,
+      ownerDeviceId,
+      file,
+    });
+    const blob = new Blob([result.bytes], { type: result.mimeType || "application/octet-stream" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = result.name || "octi-download";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  }
+
+  async function publishClipboardText(text: string) {
+    const info = textClipboard(text);
+    await publishOwnClipboard({
+      server: record.serverAddress,
+      creds,
+      crypti,
+      ownDeviceId: record.ownDeviceId,
+      info,
+    });
+    void refresh();
+  }
+
+  async function pasteOsAndPublishClipboard() {
+    const text = await navigator.clipboard.readText();
+    await publishClipboardText(text);
+  }
+
+  async function ensureLayoutFor(deviceId: string, platform: string | null) {
+    if (tileLayouts[deviceId]) return;
+    const layout = await tileLayoutRepo.getOrDefault({
+      accountId: record.accountId,
+      deviceId,
+      platform: (platform ?? "unknown").toLowerCase(),
+    });
+    tileLayouts = { ...tileLayouts, [deviceId]: layout };
+  }
+
+  async function persistLayout(deviceId: string, next: TileLayout) {
+    tileLayouts = { ...tileLayouts, [deviceId]: next };
+    await tileLayoutRepo.save({ accountId: record.accountId, deviceId, layout: next });
+  }
+
+  /**
+   * Module-payload ETag cache. Key = `${deviceId}:${moduleId}`. When the
+   * server returns the same ETag a second time the cache short-circuits the
+   * JSON.parse + decode work — this matters for AppsInfo where payloads can
+   * exceed 100 KB. The cache is reset on sign-out via component teardown.
+   */
+  const etagCache = createEtagCache<unknown>();
+
+  /**
+   * Monotonic counter incremented per refresh() invocation. Each call captures
+   * its own value; if the captured value is no longer the current seq when the
+   * fetches resolve, the call's results are discarded. Prevents stale
+   * completions (e.g. a slow poll tick + a fast manual refresh) from
+   * overwriting newer state. Mirrors the pattern called out in the
+   * implementation plan's S1.5.
+   */
+  let refreshSeq = 0;
 
   async function refresh() {
+    const mySeq = ++refreshSeq;
     loading = true;
     loadError = null;
     try {
       const list = await listDevices({ server: record.serverAddress, creds });
-      // Fetch peer MetaInfo + Clipboard in parallel per device. Each subcall isolates
-      // its own errors so one rotten payload doesn't blank the whole row.
+      // Per device, fetch all seven module payloads in parallel. Each subcall
+      // isolates its own errors so a rotten payload on one module doesn't blank
+      // the whole row. Power/Wifi/Connectivity/Apps go through the generic
+      // fetchPeerModule helper so they benefit from the ETag cache; the three
+      // existing modules keep their bespoke fetchers for now (they retain
+      // module-specific behavior like clipboard's base64 ByteString decoding).
       const enriched = await Promise.all(
         list.map(async (raw) => {
-          const [metaRes, clipRes, filesRes] = await Promise.all([
-            fetchPeerMetaInfo({ server: record.serverAddress, creds, crypti, peerDeviceId: raw.id })
-              .then((meta) => ({ meta, metaError: null as string | null }))
-              .catch((e) => ({
-                meta: null as MetaInfo | null,
-                metaError: e instanceof Error ? e.message : String(e),
-              })),
-            fetchPeerClipboard({ server: record.serverAddress, creds, crypti, peerDeviceId: raw.id })
-              .then((clipboard) => ({ clipboard, clipboardError: null as string | null }))
-              .catch((e) => ({
-                clipboard: null as ClipboardInfo | null,
-                clipboardError: e instanceof Error ? e.message : String(e),
-              })),
-            fetchPeerFileShareInfo({ server: record.serverAddress, creds, crypti, peerDeviceId: raw.id })
-              .then((fileShare) => ({ fileShare, fileShareError: null as string | null }))
-              .catch((e) => ({
-                fileShare: null as FileShareInfo | null,
-                fileShareError: e instanceof Error ? e.message : String(e),
-              })),
-          ]);
-          return { raw, ...metaRes, ...clipRes, ...filesRes } satisfies EnrichedDevice;
+          const peerId = raw.id;
+          const [metaRes, clipRes, filesRes, powerRes, wifiRes, connRes, appsRes] =
+            await Promise.all([
+              fetchPeerMetaInfo({ server: record.serverAddress, creds, crypti, peerDeviceId: peerId })
+                .then((meta) => ({ meta, metaError: null as string | null }))
+                .catch((e) => ({
+                  meta: null as MetaInfo | null,
+                  metaError: e instanceof Error ? e.message : String(e),
+                })),
+              fetchPeerClipboard({ server: record.serverAddress, creds, crypti, peerDeviceId: peerId })
+                .then((clipboard) => ({ clipboard, clipboardError: null as string | null }))
+                .catch((e) => ({
+                  clipboard: null as ClipboardInfo | null,
+                  clipboardError: e instanceof Error ? e.message : String(e),
+                })),
+              fetchPeerFileShareInfo({ server: record.serverAddress, creds, crypti, peerDeviceId: peerId })
+                .then((fileShare) => ({ fileShare, fileShareError: null as string | null }))
+                .catch((e) => ({
+                  fileShare: null as FileShareInfo | null,
+                  fileShareError: e instanceof Error ? e.message : String(e),
+                })),
+              fetchPeerModule({
+                server: record.serverAddress,
+                creds,
+                crypti,
+                peerDeviceId: peerId,
+                moduleId: POWER_MODULE_ID,
+                decode: decodePowerInfo,
+                cache: etagCache,
+              })
+                .then((res) => ({ power: res.value as PowerInfo | null, powerError: null as string | null }))
+                .catch((e) => ({
+                  power: null as PowerInfo | null,
+                  powerError: e instanceof Error ? e.message : String(e),
+                })),
+              fetchPeerModule({
+                server: record.serverAddress,
+                creds,
+                crypti,
+                peerDeviceId: peerId,
+                moduleId: WIFI_MODULE_ID,
+                decode: decodeWifiInfo,
+                cache: etagCache,
+              })
+                .then((res) => ({ wifi: res.value as WifiInfo | null, wifiError: null as string | null }))
+                .catch((e) => ({
+                  wifi: null as WifiInfo | null,
+                  wifiError: e instanceof Error ? e.message : String(e),
+                })),
+              fetchPeerModule({
+                server: record.serverAddress,
+                creds,
+                crypti,
+                peerDeviceId: peerId,
+                moduleId: CONNECTIVITY_MODULE_ID,
+                decode: decodeConnectivityInfo,
+                cache: etagCache,
+              })
+                .then((res) => ({
+                  connectivity: res.value as ConnectivityInfo | null,
+                  connectivityError: null as string | null,
+                }))
+                .catch((e) => ({
+                  connectivity: null as ConnectivityInfo | null,
+                  connectivityError: e instanceof Error ? e.message : String(e),
+                })),
+              fetchPeerModule({
+                server: record.serverAddress,
+                creds,
+                crypti,
+                peerDeviceId: peerId,
+                moduleId: APPS_MODULE_ID,
+                decode: decodeAppsInfo,
+                cache: etagCache,
+              })
+                .then((res) => ({ apps: res.value as AppsInfo | null, appsError: null as string | null }))
+                .catch((e) => ({
+                  apps: null as AppsInfo | null,
+                  appsError: e instanceof Error ? e.message : String(e),
+                })),
+            ]);
+          return {
+            raw,
+            ...metaRes,
+            ...clipRes,
+            ...filesRes,
+            ...powerRes,
+            ...wifiRes,
+            ...connRes,
+            ...appsRes,
+          } satisfies EnrichedDevice;
         }),
       );
+      if (mySeq !== refreshSeq) return; // stale completion — newer refresh in flight
+      // Pre-hydrate layouts BEFORE publishing `devices` to the UI so the grid
+      // paints in its final order on first render. IndexedDB reads are fast
+      // (<5ms locally) — awaiting them avoids the previous flicker where peers
+      // appeared first and self shifted into position when its layout resolved.
+      await Promise.all(enriched.map((d) => ensureLayoutFor(d.raw.id, d.raw.platform)));
+      if (mySeq !== refreshSeq) return;
       devices = enriched;
       lastSyncedAt = new Date();
     } catch (e) {
+      if (mySeq !== refreshSeq) return;
       if (e instanceof OctiApiError) {
         loadError = `${e.path} → ${e.status}: ${e.body.slice(0, 200)}`;
       } else {
         loadError = e instanceof Error ? e.message : String(e);
       }
     } finally {
-      loading = false;
+      if (mySeq === refreshSeq) loading = false;
     }
   }
 
@@ -124,42 +363,18 @@
     publishStatus = "publishing";
     publishError = null;
     try {
-      await publishOwnMetaInfo({ server: record.serverAddress, creds, crypti, record });
+      // Use activeRecord so a Republish after a Settings rename publishes the
+      // new label, not the original prop value.
+      await publishOwnMetaInfo({
+        server: activeRecord.serverAddress,
+        creds,
+        crypti,
+        record: activeRecord,
+      });
       publishStatus = "done";
     } catch (e) {
       publishStatus = "error";
       publishError = e instanceof Error ? e.message : String(e);
-    }
-  }
-
-  async function shareClipboard() {
-    clipboardPushStatus = null;
-    pushingClipboard = true;
-    try {
-      const info = textClipboard(clipboardDraft);
-      await publishOwnClipboard({
-        server: record.serverAddress,
-        creds,
-        crypti,
-        ownDeviceId: record.ownDeviceId,
-        info,
-      });
-      clipboardPushStatus = "Shared. Other devices will see it on their next sync.";
-      // Soft refresh so this device's clipboard card updates too.
-      void refresh();
-    } catch (e) {
-      clipboardPushStatus = `Failed: ${e instanceof Error ? e.message : String(e)}`;
-    } finally {
-      pushingClipboard = false;
-    }
-  }
-
-  async function pasteFromOsClipboard() {
-    try {
-      const text = await navigator.clipboard.readText();
-      clipboardDraft = text;
-    } catch (e) {
-      clipboardPushStatus = `Read failed: ${e instanceof Error ? e.message : String(e)}`;
     }
   }
 
@@ -172,7 +387,13 @@
     ) {
       return;
     }
-    await credentialsRepo.wipe();
+    // Wipe both DBs together — credentials + tile layouts. Either may fail
+    // silently on a private-browsing context; that's fine because reload then
+    // re-opens fresh databases anyway.
+    await Promise.all([
+      credentialsRepo.wipe().catch(() => undefined),
+      tileLayoutRepo.wipeAll().catch(() => undefined),
+    ]);
     onSignOut();
   }
 
@@ -207,108 +428,158 @@
     return () => clearInterval(i);
   });
   // Touch `now` so the derived label re-evaluates.
-  const lastSyncedLabel = $derived((void now, timeAgo(lastSyncedAt)));
+  const lastSyncLabel = $derived((void now, timeAgo(lastSyncedAt)));
+
+  // Self-first sort the device list for grid render. Layout-state lookup is
+  // keyed by deviceId so the sort doesn't disturb hydration.
+  const devicesOrdered = $derived(
+    sortDevicesSelfFirst(devices ?? [], activeRecord.ownDeviceId),
+  );
+
+  // Nav subtitle: signed-in label + bare server domain. Full URL lives in
+  // Settings; the domain is enough at-a-glance to tell which sync-server is
+  // active without cluttering the header.
+  const accountSubtitle = $derived(
+    `Signed in as ${activeRecord.deviceLabel || "Browser"} · ${activeRecord.serverAddress.domain}`,
+  );
+
+  function openSettings() {
+    showSettings = true;
+  }
+  function closeSettings() {
+    showSettings = false;
+  }
+  function openShareSheet() {
+    showShareSheet = true;
+  }
+  function closeShareSheet() {
+    showShareSheet = false;
+  }
+
+  function handleRecordUpdated(next: CredentialRecord) {
+    activeRecord = next;
+  }
+
+  const navMenuItems = $derived<MenuItem[]>([
+    {
+      label: publishStatus === "publishing" ? "Publishing…" : "Republish my MetaInfo",
+      onClick: publishOwn,
+      disabled: publishStatus === "publishing",
+    },
+    { label: "Add another device", onClick: openShareSheet },
+    { label: "Sign out", onClick: signOut, destructive: true, separatorBefore: true },
+  ]);
 </script>
 
-<section>
-  <header style="display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap;">
-    <h1 style="margin: 0;">Octi web</h1>
-    <span style="opacity: 0.65; font-size: 0.85rem;">
-      Signed in as {record.deviceLabel || "Browser"} ·
-      {record.serverAddress.protocol}://{record.serverAddress.domain}:{record.serverAddress.port}
-    </span>
-    <span style="margin-left: auto; opacity: 0.7; font-size: 0.85rem;">
-      {loading ? "Syncing…" : `Last sync: ${lastSyncedLabel}`}
-    </span>
-  </header>
-
-  <div style="display: flex; gap: 0.5rem; margin: 0.75rem 0 1rem; flex-wrap: wrap;">
-    <button onclick={refresh} disabled={loading}>
-      {loading ? "Refreshing…" : "Refresh now"}
-    </button>
-    <button onclick={publishOwn} disabled={publishStatus === "publishing"}>
-      {publishStatus === "publishing" ? "Publishing…" : "Republish my MetaInfo"}
-    </button>
-    <button onclick={() => (showShare = !showShare)}>
-      {showShare ? "Hide share code" : "Add another device"}
-    </button>
-    <button onclick={signOut} style="margin-left: auto;">Sign out</button>
-  </div>
-
-  {#if publishStatus === "error" && publishError}
-    <p style="color: #ff8a8a;">MetaInfo publish failed: {publishError}</p>
-  {/if}
-
-  {#if loadError}
-    <p style="color: #ff8a8a;">{loadError}</p>
-  {/if}
-
-  <h2>Share my clipboard</h2>
-  <p style="opacity: 0.7; font-size: 0.85rem; margin-top: 0;">
-    Manual share — type or paste, then hit "Share". Max {CLIPBOARD_MAX_BYTES / 1024} KiB.
-  </p>
-  <textarea
-    bind:value={clipboardDraft}
-    rows="3"
-    placeholder="Paste or type here…"
-  ></textarea>
-  <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
-    <button onclick={shareClipboard} disabled={pushingClipboard || clipboardDraft.length === 0}>
-      {pushingClipboard ? "Sharing…" : "Share"}
-    </button>
-    <button onclick={pasteFromOsClipboard}>Paste from OS clipboard</button>
-  </div>
-  {#if clipboardPushStatus}
-    <p style="opacity: 0.85; font-size: 0.85rem;">{clipboardPushStatus}</p>
-  {/if}
-
-  {#if devices}
-    <h2>Devices ({devices.length})</h2>
-    <ul style="list-style: none; padding: 0; display: grid; gap: 0.5rem;">
-      {#each devices as d (d.raw.id)}
-        {@const isSelf = d.raw.id === record.ownDeviceId}
-        {@const label = metaInfoLabel(d.meta, d.raw.label ?? "(no label)")}
-        <li
-          style="padding: 0.6rem 0.75rem; border: 1px solid rgba(255,255,255,0.12); border-radius: 6px;"
-        >
-          <strong>{label}</strong>
-          {#if isSelf}<span style="opacity: 0.6;"> · this device</span>{/if}
-          {#if d.meta}
-            <div style="opacity: 0.7; font-size: 0.85rem;">
-              {d.meta.deviceManufacturer} {d.meta.deviceName} · {d.meta.deviceType.toLowerCase()}
-              {#if d.meta.osType}· {d.meta.osType}{d.meta.osVersionName ? ` ${d.meta.osVersionName}` : ""}{/if}
-              · octi {d.meta.octiVersionName}
-            </div>
-          {:else if d.metaError}
-            <div style="opacity: 0.6; font-size: 0.8rem; color: #ffcc88;">
-              MetaInfo unavailable: {d.metaError}
-            </div>
-          {:else}
-            <div style="opacity: 0.6; font-size: 0.8rem;">No MetaInfo published yet</div>
-          {/if}
-          <div style="opacity: 0.5; font-size: 0.8rem;">
-            id: <code>{d.raw.id}</code> · last seen: {d.raw.lastSeen ?? "?"}
-          </div>
-          <div style="margin-top: 0.5rem;">
-            <ClipboardCard deviceLabel={label} info={d.clipboard} fetchError={d.clipboardError} />
-          </div>
-        </li>
-      {/each}
-    </ul>
-  {/if}
-
-  {#if blobCipher}
-    <Files
-      {record}
-      {creds}
-      {crypti}
-      blobCipher={blobCipher}
-      rows={fileRows}
-      onAfterChange={refresh}
+<section class="dashboard">
+  <div class="header-cap">
+    <NavBar
+      {accountSubtitle}
+      version={OCTI_WEB_DISPLAY_VERSION}
+      {lastSyncLabel}
+      {loading}
+      onRefresh={refresh}
+      onOpenSettings={openSettings}
+      menuItems={navMenuItems}
     />
+
+    {#if publishStatus === "error" && publishError}
+      <p class="banner err">MetaInfo publish failed: {publishError}</p>
+    {/if}
+    {#if loadError}
+      <p class="banner err">{loadError}</p>
+    {/if}
+    {#if uploadStatus}
+      <p class="banner">{uploadStatus}</p>
+    {/if}
+  </div>
+
+  {#if devicesOrdered.length > 0}
+    <div class="device-grid">
+      {#each devicesOrdered as d (d.raw.id)}
+        {@const isSelf = d.raw.id === activeRecord.ownDeviceId}
+        {@const layout = tileLayouts[d.raw.id]}
+        {#if layout}
+          <DeviceCard
+            deviceLabel={d.raw.label ?? "(no label)"}
+            devicePlatform={d.raw.platform ?? "unknown"}
+            lastSeen={d.raw.lastSeen}
+            {isSelf}
+            {layout}
+            data={d}
+            {ownConnectorId}
+            onLayoutChange={(next) => void persistLayout(d.raw.id, next)}
+            onClipboardPasteOs={isSelf ? pasteOsAndPublishClipboard : undefined}
+            onClipboardPublishText={isSelf ? publishClipboardText : undefined}
+            onFilesPickUpload={isSelf ? triggerHiddenFilePick : undefined}
+            onFilesUploadCallback={isSelf ? runUpload : undefined}
+            onDownloadFile={(f) => downloadFile(f, d.raw.id)}
+          />
+        {/if}
+      {/each}
+    </div>
   {/if}
 
-  {#if showShare}
-    <ShareCode />
-  {/if}
+  <!-- Hidden file input used by the own-device FilesTile quick-action button. -->
+  <input
+    bind:this={hiddenFileInput}
+    type="file"
+    onchange={onHiddenFilePicked}
+    style="display: none;"
+    aria-hidden="true"
+  />
 </section>
+
+{#if showSettings}
+  <SettingsScreen
+    record={activeRecord}
+    onRecordUpdated={handleRecordUpdated}
+    onSignOut={signOut}
+    onClose={closeSettings}
+  />
+{/if}
+
+{#if showShareSheet}
+  <Sheet title="Add another device" subtitle="Share a one-time code or QR" wide onClose={closeShareSheet}>
+    <ShareCode />
+  </Sheet>
+{/if}
+
+<style>
+  .device-grid {
+    /*
+     * Auto-flow grid that fills the entire viewport width — intentionally
+     * NOT capped, so on an ultrawide / TV the user gets as many columns as
+     * their screen affords (4 at ~1920px, 5 at ~2400px, 7 at ~3440px). The
+     * min(100%, 440px) inner makes tracks shrink below 440px on phones
+     * narrower than that, instead of overflowing horizontally.
+     */
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 440px), 1fr));
+    gap: 12px;
+  }
+  /*
+   * Nav header + status banners stay capped at a readable width even on
+   * ultrawide / TV — only the device grid below scales to fill the screen.
+   */
+  .header-cap {
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+  /* min-width:0 on grid items so inner pair-rows can't force a column wider than the track. */
+  .device-grid > :global(*) {
+    min-width: 0;
+  }
+  .banner {
+    margin: 0 0 12px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    background: color-mix(in srgb, var(--md-color-on-surface) 6%, transparent);
+    color: var(--md-color-on-surface);
+  }
+  .banner.err {
+    background: color-mix(in srgb, var(--md-color-error) 18%, transparent);
+    color: var(--md-color-error);
+  }
+</style>
