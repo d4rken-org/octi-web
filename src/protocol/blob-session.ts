@@ -228,12 +228,18 @@ export async function uploadBlobBytes(args: {
     hashAlgorithm: "sha256",
     hashHex: ciphertextHash,
   });
+  if (session.offsetBytes < 0 || session.offsetBytes > args.ciphertext.length) {
+    throw new Error(
+      `blob-sessions/create: invalid initial offset ${session.offsetBytes} for ${args.ciphertext.length}-byte ciphertext`,
+    );
+  }
   let offset = session.offsetBytes;
   try {
     while (offset < args.ciphertext.length) {
       const end = Math.min(offset + BLOB_PATCH_CHUNK_SIZE, args.ciphertext.length);
       const chunk = args.ciphertext.subarray(offset, end);
-      offset = await appendBlobSession({
+      const prev = offset;
+      const next = await appendBlobSession({
         server: args.server,
         creds: args.creds,
         version: args.version,
@@ -243,6 +249,21 @@ export async function uploadBlobBytes(args: {
         offset,
         chunk,
       });
+      // Server contract: every PATCH must report strict offset progress. A
+      // same-or-lower response would loop forever if we accepted it; a beyond-
+      // end response would leave us thinking the upload is done but with the
+      // server in an inconsistent state.
+      if (next <= prev) {
+        throw new Error(
+          `blob-sessions/append: server reported non-progressing offset ${next} (was ${prev})`,
+        );
+      }
+      if (next > args.ciphertext.length) {
+        throw new Error(
+          `blob-sessions/append: server reported offset ${next} past ciphertext length ${args.ciphertext.length}`,
+        );
+      }
+      offset = next;
       args.onProgress?.(offset, args.ciphertext.length);
     }
     const finalized = await finalizeBlobSession({
