@@ -90,29 +90,27 @@ jobs:
           tar -czf "octi-web-${REF_NAME}.tar.gz" -C dist .
           ls -la "octi-web-${REF_NAME}.tar.gz"
 
-      - name: Create pre-release (rc/beta)
-        if: contains(github.ref_name, '-')
-        uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v3.0.0
-        with:
-          prerelease: true
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
-          generate_release_notes: true
-          files: octi-web-*.tar.gz
+      # Use `gh release create` directly so the release is created WITH its assets
+      # in a single API call. softprops/action-gh-release creates-then-attaches,
+      # which fails on repos with "Immutable Releases" enabled (the release is
+      # frozen at creation time and assets can't be added after the fact).
+      - name: Create release with assets
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create stable release (suffix-free)
-        if: ${{ !contains(github.ref_name, '-') }}
-        uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v3.0.0
-        with:
-          prerelease: false
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
-          generate_release_notes: true
-          files: octi-web-*.tar.gz
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          flags=(
+            --title "${REF_NAME}"
+            --generate-notes
+          )
+          # Pre-release for -rc/-beta tags (anything with a suffix); stable for vM.m.p.
+          if [[ "${REF_NAME}" == *-* ]]; then
+            flags+=(--prerelease)
+          else
+            flags+=(--latest)
+          fi
+          gh release create "${REF_NAME}" "${flags[@]}" "octi-web-${REF_NAME}.tar.gz"
 
   release-pages:
     needs: validate-tag
