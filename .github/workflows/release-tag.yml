@@ -90,29 +90,27 @@ jobs:
           tar -czf "octi-web-${REF_NAME}.tar.gz" -C dist .
           ls -la "octi-web-${REF_NAME}.tar.gz"
 
-      - name: Create pre-release (rc/beta)
-        if: contains(github.ref_name, '-')
-        uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v3.0.0
-        with:
-          prerelease: true
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
-          generate_release_notes: true
-          files: octi-web-*.tar.gz
+      # Use `gh release create` directly so the release is created WITH its assets
+      # in a single API call. softprops/action-gh-release creates-then-attaches,
+      # which fails on repos with "Immutable Releases" enabled (the release is
+      # frozen at creation time and assets can't be added after the fact).
+      - name: Create release with assets
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create stable release (suffix-free)
-        if: ${{ !contains(github.ref_name, '-') }}
-        uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v3.0.0
-        with:
-          prerelease: false
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
-          generate_release_notes: true
-          files: octi-web-*.tar.gz
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          flags=(
+            --title "${REF_NAME}"
+            --generate-notes
+          )
+          # Pre-release for -rc/-beta tags (anything with a suffix); stable for vM.m.p.
+          if [[ "${REF_NAME}" == *-* ]]; then
+            flags+=(--prerelease)
+          else
+            flags+=(--latest)
+          fi
+          gh release create "${REF_NAME}" "${flags[@]}" "octi-web-${REF_NAME}.tar.gz"
 
   release-pages:
     needs: validate-tag
@@ -138,16 +136,16 @@ jobs:
         run: pnpm build
 
       - name: Configure Pages
-        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: dist/
 
       - name: Deploy to Pages
         id: deploy
-        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
 
   release-docker:
     needs: validate-tag
