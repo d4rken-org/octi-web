@@ -91,7 +91,16 @@ jobs:
           fi
           # Belt-and-braces: assert the expected check names are present and successful so
           # a commit that somehow skipped CI entirely can't sneak through.
-          for expected in check test build smoke release-tooling; do
+          # NB: these are the `name:` fields from code-checks.yml (what GitHub reports
+          # as the check-run name), not the YAML job IDs.
+          expected_checks=(
+            "Type check"
+            "Unit tests"
+            "Production build"
+            "Smoke (real sync-server)"
+            "Release tooling"
+          )
+          for expected in "${expected_checks[@]}"; do
             ok=$(echo "$checks" | jq --arg n "$expected" '[.[] | select(.name == $n and .conclusion == "success")] | length')
             if [[ "$ok" == "0" ]]; then
               echo "::error::Required check '$expected' is missing or not successful on this commit." >&2
