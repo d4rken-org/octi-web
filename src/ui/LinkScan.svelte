@@ -6,6 +6,7 @@
   import { decodeLinkingData } from "../linking/linking-data";
   import { openCameraStream, scanQrFromVideo } from "../linking/qr";
   import { credentialsRepo, type CredentialRecord } from "../storage/credentials-repo";
+  import { getOwnDeviceId } from "../storage/identity-settings";
   import { OCTI_WEB_VERSION } from "../version";
 
   let { onDone }: { onDone: () => void } = $props();
@@ -48,7 +49,9 @@
   async function join(encodedLink: string) {
     status = "joining";
     const link = decodeLinkingData(encodedLink);
-    const deviceId = crypto.randomUUID();
+    // Reuse the per-install own-device UUID so this browser appears as one
+    // device card across every connector we pair with.
+    const deviceId = await getOwnDeviceId();
     const account = await createOrJoinAccount({
       server: link.serverAddress,
       deviceId,

@@ -20,6 +20,13 @@ import type { OctiServerConnector } from "../protocol/octi-server-connector";
 export interface CacheEntry<I> {
   etag: string;
   value: I;
+  /**
+   * Server-side modification timestamp parsed from the {@code X-Modified-At}
+   * header. Preserved through cache hits so the multi-connector merge can
+   * still order ETag-cached results correctly. {@code null} when the server
+   * didn't provide it (older sync-server).
+   */
+  modifiedAt: Date | null;
 }
 
 export interface EtagCache<I = unknown> {
@@ -53,6 +60,12 @@ export interface FetchPeerModuleResult<I> {
   value: I | null;
   /** Server-supplied ETag, or `null` if the payload is empty. */
   etag: string | null;
+  /**
+   * Server-side modification timestamp (parsed from `X-Modified-At`), or
+   * `null` if the server didn't provide it. The cross-connector merge orders
+   * by this value; absent → treat as oldest.
+   */
+  modifiedAt: Date | null;
   /** True when the result was reused from the in-memory cache (matched ETag). */
   cached: boolean;
 }
@@ -69,15 +82,23 @@ export async function fetchPeerModule<I>(args: {
     targetDeviceId: args.peerDeviceId,
     moduleId: args.moduleId,
   });
-  if (!result) return { value: null, etag: null, cached: false };
+  if (!result) return { value: null, etag: null, modifiedAt: null, cached: false };
 
-  const { bytes, etag } = result;
+  const { bytes, etag, modifiedAt } = result;
   const key = cacheKey(args.connector.connectorId, args.peerDeviceId, args.moduleId);
 
   if (etag && args.cache) {
     const cached = args.cache.get(key);
     if (cached && cached.etag === etag) {
-      return { value: cached.value, etag, cached: true };
+      // Use the *fresh* modifiedAt over the cached one. Servers may update the
+      // X-Modified-At semantics (e.g. after a CORS expose-header fix) while
+      // the ETag stays stable, and a cached `null` would otherwise stick
+      // forever. Only fall back to cached when the fresh value is missing.
+      const effectiveModifiedAt = modifiedAt ?? cached.modifiedAt;
+      if (effectiveModifiedAt !== cached.modifiedAt) {
+        args.cache.set(key, { etag, value: cached.value, modifiedAt: effectiveModifiedAt });
+      }
+      return { value: cached.value, etag, modifiedAt: effectiveModifiedAt, cached: true };
     }
   }
 
@@ -87,7 +108,7 @@ export async function fetchPeerModule<I>(args: {
   const value = args.decode(json);
 
   if (etag && args.cache) {
-    args.cache.set(key, { etag, value });
+    args.cache.set(key, { etag, value, modifiedAt });
   }
-  return { value, etag, cached: false };
+  return { value, etag, modifiedAt, cached: false };
 }

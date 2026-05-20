@@ -30,11 +30,14 @@
    */
   let {
     record,
+    ownDeviceId,
     onRecordUpdated,
     onSignOut,
     onClose,
   }: {
     record: CredentialRecord;
+    /** Per-install own-device UUID, threaded from App.svelte → DashboardStub. */
+    ownDeviceId: string;
     onRecordUpdated: (next: CredentialRecord) => void;
     onSignOut: () => void;
     onClose: () => void;
@@ -96,7 +99,7 @@
       // and the next sync tick reconciles peers.
       await credentialsRepo.save(updated);
       const crypti = createPayloadEncryption(updated.encryptionKeyset);
-      const connector = new OctiServerConnector(updated);
+      const connector = new OctiServerConnector(updated, ownDeviceId);
       await publishOwnMetaInfo({ connector, crypti });
       saveStatus = "ok";
       onRecordUpdated(updated);
@@ -137,7 +140,10 @@
     <h3 class="h3">Connection</h3>
     <DetailRow label="Server" value={serverBaseUrl(record.serverAddress)} mono />
     <DetailRow label="Account ID" value={record.accountId} mono />
-    <DetailRow label="Device ID" value={record.ownDeviceId} mono />
+    <!-- Display the IdentitySettings-sourced own device id rather than
+         record.ownDeviceId — the record field is legacy and may drift; the
+         prop is what we actually send as X-Device-ID. -->
+    <DetailRow label="Device ID" value={ownDeviceId} mono />
   </section>
 
   <section class="block">

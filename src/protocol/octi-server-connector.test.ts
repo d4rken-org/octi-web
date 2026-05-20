@@ -37,10 +37,13 @@ const RECORD: OctiServerCredentialRecord = {
   updatedAt: 0,
 };
 const SERVER = RECORD.serverAddress;
+// Per-install own-device UUID — sourced in production from IdentitySettings;
+// here we just pin it to a constant so forwarding assertions are stable.
+const OWN_DEVICE_ID = "own-install-uuid";
 const CREDS = {
   accountId: "acct-1",
   devicePassword: "pwd-1",
-  deviceId: "dev-1",
+  deviceId: OWN_DEVICE_ID,
 };
 
 describe("octiServerConnectorId", () => {
@@ -64,13 +67,24 @@ describe("octiServerConnectorId", () => {
 });
 
 describe("OctiServerConnector getters", () => {
-  it("derives connectorId, ownDeviceId, server, creds from the record", () => {
-    const c = new OctiServerConnector(RECORD);
+  it("derives connectorId + server from the record, ownDeviceId from the constructor arg, creds composes both", () => {
+    const c = new OctiServerConnector(RECORD, OWN_DEVICE_ID);
     expect(c.connectorId).toBe("kserver-sync.test-acct-1");
-    expect(c.ownDeviceId).toBe("dev-1");
+    expect(c.ownDeviceId).toBe(OWN_DEVICE_ID);
     expect(c.server).toEqual(SERVER);
     expect(c.creds).toEqual(CREDS);
     expect(c.record).toBe(RECORD);
+  });
+
+  it("ownDeviceId comes from the IdentitySettings arg, NOT record.ownDeviceId", () => {
+    // The record's `ownDeviceId` field is legacy data — the connector now
+    // sources its identity from IdentitySettings (passed in by App.svelte).
+    // This pins the precedence so a future refactor doesn't silently flip
+    // back to reading from the record.
+    const c = new OctiServerConnector(RECORD, "explicit-identity-uuid");
+    expect(c.ownDeviceId).toBe("explicit-identity-uuid");
+    expect(c.ownDeviceId).not.toBe(RECORD.ownDeviceId);
+    expect(c.creds.deviceId).toBe("explicit-identity-uuid");
   });
 });
 
@@ -80,19 +94,19 @@ describe("OctiServerConnector forwarding", () => {
   });
 
   it("createShareCode forwards server + creds", async () => {
-    const c = new OctiServerConnector(RECORD);
+    const c = new OctiServerConnector(RECORD, OWN_DEVICE_ID);
     await c.createShareCode();
     expect(api.createShareCode).toHaveBeenCalledWith({ server: SERVER, creds: CREDS });
   });
 
   it("listDevices forwards server + creds", async () => {
-    const c = new OctiServerConnector(RECORD);
+    const c = new OctiServerConnector(RECORD, OWN_DEVICE_ID);
     await c.listDevices();
     expect(api.listDevices).toHaveBeenCalledWith({ server: SERVER, creds: CREDS });
   });
 
   it("readModulePayload forwards per-call args alongside server + creds", async () => {
-    const c = new OctiServerConnector(RECORD);
+    const c = new OctiServerConnector(RECORD, OWN_DEVICE_ID);
     await c.readModulePayload({ targetDeviceId: "peer-x", moduleId: "mod-x" });
     expect(api.readModulePayload).toHaveBeenCalledWith({
       server: SERVER,
@@ -103,7 +117,7 @@ describe("OctiServerConnector forwarding", () => {
   });
 
   it("readModulePayloadWithEtag forwards per-call args", async () => {
-    const c = new OctiServerConnector(RECORD);
+    const c = new OctiServerConnector(RECORD, OWN_DEVICE_ID);
     await c.readModulePayloadWithEtag({ targetDeviceId: "peer-y", moduleId: "mod-y" });
     expect(api.readModulePayloadWithEtag).toHaveBeenCalledWith({
       server: SERVER,
@@ -114,7 +128,7 @@ describe("OctiServerConnector forwarding", () => {
   });
 
   it("writeModulePayload forwards deviceTag when supplied", async () => {
-    const c = new OctiServerConnector(RECORD);
+    const c = new OctiServerConnector(RECORD, OWN_DEVICE_ID);
     const ct = new Uint8Array([9]);
     const tag = { version: "v", label: "L" };
     await c.writeModulePayload({
@@ -134,7 +148,7 @@ describe("OctiServerConnector forwarding", () => {
   });
 
   it("commitModule forwards ifMatch / ifNoneMatchStar precondition headers", async () => {
-    const c = new OctiServerConnector(RECORD);
+    const c = new OctiServerConnector(RECORD, OWN_DEVICE_ID);
     const doc = new Uint8Array([0]);
     await c.commitModule({
       targetDeviceId: "dev-1",
@@ -173,7 +187,7 @@ describe("OctiServerConnector forwarding", () => {
   });
 
   it("uploadBlobBytes injects OCTI_WEB_VERSION and forwards onProgress", async () => {
-    const c = new OctiServerConnector(RECORD);
+    const c = new OctiServerConnector(RECORD, OWN_DEVICE_ID);
     const ct = new Uint8Array([1, 2]);
     const onProgress = vi.fn();
     await c.uploadBlobBytes({
@@ -194,7 +208,7 @@ describe("OctiServerConnector forwarding", () => {
   });
 
   it("downloadBlob injects OCTI_WEB_VERSION and forwards targetDeviceId + moduleId + blobId", async () => {
-    const c = new OctiServerConnector(RECORD);
+    const c = new OctiServerConnector(RECORD, OWN_DEVICE_ID);
     await c.downloadBlob({ targetDeviceId: "peer-z", moduleId: "files", blobId: "b-99" });
     expect(blob.downloadBlob).toHaveBeenCalledWith({
       server: SERVER,

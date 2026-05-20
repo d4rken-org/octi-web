@@ -90,17 +90,24 @@ export async function publishOwnClipboard(args: {
   });
 }
 
+export interface FetchPeerClipboardResult {
+  /** Decoded ClipboardInfo, or `null` if the peer hasn't published this module yet. */
+  value: ClipboardInfo | null;
+  /** Server-side modification timestamp (parsed from `X-Modified-At`), or null. */
+  modifiedAt: Date | null;
+}
+
 export async function fetchPeerClipboard(args: {
   connector: OctiServerConnector;
   crypti: PayloadEncryption;
   peerDeviceId: string;
-}): Promise<ClipboardInfo | null> {
-  const ciphertext = await args.connector.readModulePayload({
+}): Promise<FetchPeerClipboardResult> {
+  const result = await args.connector.readModulePayloadWithEtag({
     targetDeviceId: args.peerDeviceId,
     moduleId: CLIPBOARD_MODULE_ID,
   });
-  if (!ciphertext) return null;
+  if (!result) return { value: null, modifiedAt: null };
   const ad = buildAssociatedData(args.peerDeviceId, CLIPBOARD_MODULE_ID);
-  const plaintext = args.crypti.decrypt(ciphertext, ad);
-  return deserializeClipboardInfo(plaintext);
+  const plaintext = args.crypti.decrypt(result.bytes, ad);
+  return { value: deserializeClipboardInfo(plaintext), modifiedAt: result.modifiedAt };
 }
