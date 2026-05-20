@@ -161,11 +161,12 @@ describe("octi-api", () => {
       );
     });
 
-    it("propagates ETag via readModulePayloadWithEtag", async () => {
+    it("propagates ETag and X-Modified-At via readModulePayloadWithEtag", async () => {
+      const modifiedAtHeader = "Wed, 20 May 2026 19:00:00 GMT";
       fetchSpy.mockResolvedValueOnce(
         new Response(new Uint8Array([1, 2, 3]), {
           status: 200,
-          headers: { ETag: '"abc-123"' },
+          headers: { ETag: '"abc-123"', "X-Modified-At": modifiedAtHeader },
         }),
       );
       const result = await readModulePayloadWithEtag({
@@ -176,6 +177,39 @@ describe("octi-api", () => {
       });
       expect(result?.bytes).toEqual(new Uint8Array([1, 2, 3]));
       expect(result?.etag).toBe('"abc-123"');
+      expect(result?.modifiedAt).toEqual(new Date(modifiedAtHeader));
+    });
+
+    it("returns modifiedAt: null when X-Modified-At header is absent (older sync-server)", async () => {
+      fetchSpy.mockResolvedValueOnce(
+        new Response(new Uint8Array([4, 5, 6]), {
+          status: 200,
+          headers: { ETag: '"e2"' },
+        }),
+      );
+      const result = await readModulePayloadWithEtag({
+        server,
+        creds,
+        targetDeviceId: "peer-1",
+        moduleId: "mod.x",
+      });
+      expect(result?.modifiedAt).toBeNull();
+    });
+
+    it("returns modifiedAt: null when X-Modified-At is unparseable", async () => {
+      fetchSpy.mockResolvedValueOnce(
+        new Response(new Uint8Array([7, 8]), {
+          status: 200,
+          headers: { ETag: '"e3"', "X-Modified-At": "not-a-date" },
+        }),
+      );
+      const result = await readModulePayloadWithEtag({
+        server,
+        creds,
+        targetDeviceId: "peer-1",
+        moduleId: "mod.x",
+      });
+      expect(result?.modifiedAt).toBeNull();
     });
 
     it("throws OctiApiError on 404", async () => {

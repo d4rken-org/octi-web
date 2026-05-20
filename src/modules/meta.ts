@@ -53,12 +53,21 @@ export function deserializeMetaInfo(bytes: Uint8Array): MetaInfo {
  * Anything Android-specific stays null — the Android `MetaInfoFormatting` UI
  * already special-cases nullable fields, and {@code DeviceType.BROWSER} is
  * the disambiguator.
+ *
+ * `ownDeviceId` is sourced from the connector (which threads it through from
+ * {@code IdentitySettings}) — NOT from the record. The record field is legacy
+ * and may drift if a future code path doesn't keep them in sync; the
+ * connector is the single source of truth for "what UUID identifies this
+ * browser to the server".
  */
-export async function buildOwnMetaInfo(record: CredentialRecord): Promise<MetaInfo> {
+export async function buildOwnMetaInfo(
+  record: CredentialRecord,
+  ownDeviceId: string,
+): Promise<MetaInfo> {
   const browser = await detectBrowserInfo();
   return {
     deviceLabel: record.deviceLabel.length > 0 ? record.deviceLabel : null,
-    deviceId: { id: record.ownDeviceId },
+    deviceId: { id: ownDeviceId },
     octiVersionName: OCTI_WEB_VERSION,
     octiGitSha: OCTI_WEB_GIT_SHA,
     deviceManufacturer: browser.manufacturer,
@@ -77,39 +86,46 @@ export async function publishOwnMetaInfo(args: {
   connector: OctiServerConnector;
   crypti: PayloadEncryption;
 }): Promise<void> {
-  const record = args.connector.record;
-  const info = await buildOwnMetaInfo(record);
+  const ownDeviceId = args.connector.ownDeviceId;
+  const info = await buildOwnMetaInfo(args.connector.record, ownDeviceId);
   const plaintext = serializeMetaInfo(info);
-  const ad = buildAssociatedData(record.ownDeviceId, META_MODULE_ID);
+  const ad = buildAssociatedData(ownDeviceId, META_MODULE_ID);
   const ciphertext = args.crypti.encrypt(plaintext, ad);
   // Pass label + version so the server updates DeviceMetadata.label on this
   // authed write. Without the label header, peers fetching /v1/devices would
   // still see the previous label until they happened to decode the new
   // (encrypted) MetaInfo payload.
   await args.connector.writeModulePayload({
-    targetDeviceId: record.ownDeviceId,
+    targetDeviceId: ownDeviceId,
     moduleId: META_MODULE_ID,
     ciphertext,
     deviceTag: {
       version: OCTI_WEB_VERSION,
-      label: record.deviceLabel,
+      label: args.connector.record.deviceLabel,
     },
   });
+}
+
+export interface FetchPeerMetaInfoResult {
+  /** Decoded MetaInfo, or `null` if the peer hasn't published this module yet. */
+  value: MetaInfo | null;
+  /** Server-side modification timestamp (parsed from `X-Modified-At`), or null. */
+  modifiedAt: Date | null;
 }
 
 export async function fetchPeerMetaInfo(args: {
   connector: OctiServerConnector;
   crypti: PayloadEncryption;
   peerDeviceId: string;
-}): Promise<MetaInfo | null> {
-  const ciphertext = await args.connector.readModulePayload({
+}): Promise<FetchPeerMetaInfoResult> {
+  const result = await args.connector.readModulePayloadWithEtag({
     targetDeviceId: args.peerDeviceId,
     moduleId: META_MODULE_ID,
   });
-  if (!ciphertext) return null;
+  if (!result) return { value: null, modifiedAt: null };
   const ad = buildAssociatedData(args.peerDeviceId, META_MODULE_ID);
-  const plaintext = args.crypti.decrypt(ciphertext, ad);
-  return deserializeMetaInfo(plaintext);
+  const plaintext = args.crypti.decrypt(result.bytes, ad);
+  return { value: deserializeMetaInfo(plaintext), modifiedAt: result.modifiedAt };
 }
 
 /** Pretty label for UI: prefer the user-set `deviceLabel`, then `deviceName`, else fallback. */

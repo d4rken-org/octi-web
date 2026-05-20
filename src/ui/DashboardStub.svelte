@@ -60,7 +60,16 @@
   import Sheet from "./dashboard/Sheet.svelte";
   import ShareCode from "./ShareCode.svelte";
 
-  let { record, onSignOut }: { record: CredentialRecord; onSignOut: () => void } = $props();
+  let {
+    record,
+    ownDeviceId,
+    onSignOut,
+  }: {
+    record: CredentialRecord;
+    /** Per-install own-device UUID resolved by App.svelte's bootstrap (see IdentitySettings). */
+    ownDeviceId: string;
+    onSignOut: () => void;
+  } = $props();
 
   /**
    * Mutable copy of the credential record used everywhere downstream. The
@@ -79,7 +88,7 @@
    * mutates `deviceLabel`, but a latent bug for any future rename-mutable
    * field that fed into crypto / auth.
    */
-  const connector = $derived(new OctiServerConnector(activeRecord));
+  const connector = $derived(new OctiServerConnector(activeRecord, ownDeviceId));
   const crypti = $derived(createPayloadEncryption(activeRecord.encryptionKeyset));
 
   interface EnrichedDevice {
@@ -240,20 +249,23 @@
           const peerId = raw.id;
           const [metaRes, clipRes, filesRes, powerRes, wifiRes, connRes, appsRes] =
             await Promise.all([
+              // fetchPeer* now return `{ value, modifiedAt }` (or `{ info, modifiedAt }` for files).
+              // We discard `modifiedAt` here in PR 1; the multi-connector merge in PR 2 will
+              // consume it. Keeping the dashboard's per-tile shape unchanged.
               fetchPeerMetaInfo({ connector, crypti, peerDeviceId: peerId })
-                .then((meta) => ({ meta, metaError: null as string | null }))
+                .then((res) => ({ meta: res.value, metaError: null as string | null }))
                 .catch((e) => ({
                   meta: null as MetaInfo | null,
                   metaError: e instanceof Error ? e.message : String(e),
                 })),
               fetchPeerClipboard({ connector, crypti, peerDeviceId: peerId })
-                .then((clipboard) => ({ clipboard, clipboardError: null as string | null }))
+                .then((res) => ({ clipboard: res.value, clipboardError: null as string | null }))
                 .catch((e) => ({
                   clipboard: null as ClipboardInfo | null,
                   clipboardError: e instanceof Error ? e.message : String(e),
                 })),
               fetchPeerFileShareInfo({ connector, crypti, peerDeviceId: peerId })
-                .then((fileShare) => ({ fileShare, fileShareError: null as string | null }))
+                .then((res) => ({ fileShare: res.info, fileShareError: null as string | null }))
                 .catch((e) => ({
                   fileShare: null as FileShareInfo | null,
                   fileShareError: e instanceof Error ? e.message : String(e),
@@ -414,9 +426,12 @@
   const lastSyncLabel = $derived((void now, timeAgo(lastSyncedAt)));
 
   // Self-first sort the device list for grid render. Layout-state lookup is
-  // keyed by deviceId so the sort doesn't disturb hydration.
+  // keyed by deviceId so the sort doesn't disturb hydration. We use the
+  // IdentitySettings-sourced `ownDeviceId` (the prop) — NOT
+  // `activeRecord.ownDeviceId` — so a future drift between the record's
+  // legacy field and the connector's identity doesn't misplace the self card.
   const devicesOrdered = $derived(
-    sortDevicesSelfFirst(devices ?? [], activeRecord.ownDeviceId),
+    sortDevicesSelfFirst(devices ?? [], ownDeviceId),
   );
 
   // Screenshot-CI marker. Set once the first refresh has completed (devices
@@ -499,7 +514,7 @@
   {#if devicesOrdered.length > 0}
     <div class="device-grid">
       {#each devicesOrdered as d (d.raw.id)}
-        {@const isSelf = d.raw.id === activeRecord.ownDeviceId}
+        {@const isSelf = d.raw.id === ownDeviceId}
         {@const layout = tileLayouts[d.raw.id]}
         {#if layout}
           <DeviceCard
@@ -536,6 +551,7 @@
 {#if showSettings}
   <SettingsScreen
     record={activeRecord}
+    {ownDeviceId}
     onRecordUpdated={handleRecordUpdated}
     onSignOut={signOut}
     onClose={closeSettings}

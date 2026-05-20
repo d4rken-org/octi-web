@@ -1,4 +1,5 @@
 import type { OctiServerCredentialRecord } from "../storage/credentials-repo";
+import type { SyncConnector } from "../sync/sync-connector";
 import { OCTI_WEB_VERSION } from "../version";
 import {
   type AuthCreds,
@@ -18,31 +19,38 @@ import type { DeviceMetadata, ServerAddress, ShareCodeResponse } from "./models"
 
 /**
  * Application-side facade over the Octi sync-server REST + blob-session APIs.
- * One connector instance is bound to one `OctiServerCredentialRecord` — server
- * address, auth creds, and own-device-id all come from the record so callers
- * never thread `{server, creds}` pairs manually.
+ * Implements {@link SyncConnector} — the application-level contract a future
+ * GDrive (or other) connector would also satisfy.
  *
- * This is the seam where a future `SyncConnector` interface lands when web
- * grows multi-connector support. Today there's only one variant (`kserver`);
- * a GDrive sibling would implement the same surface and the UI would consume
- * either through the interface.
+ * One connector instance is bound to one `OctiServerCredentialRecord` plus
+ * the per-install own-device-id (passed at construction so the connector is
+ * synchronous to use — the dashboard resolves `getOwnDeviceId()` once at
+ * bootstrap, not on every fetch).
  *
  * Free protocol functions remain exported for the smoke / protocol-layer
- * tests; this class is the *application-side* entry point.
- *
- * Only the methods modules actually consume are exposed. Low-level blob-session
- * primitives (create/append/finalize/abort) are intentionally NOT on the class
- * — `uploadBlobBytes` already wraps them.
+ * tests; this class is the *application-side* entry point. Only methods
+ * modules actually consume are exposed (low-level blob-session create / append
+ * / finalize / abort live on the protocol layer; `uploadBlobBytes` wraps them).
  */
-export class OctiServerConnector {
-  constructor(public readonly record: OctiServerCredentialRecord) {}
+export class OctiServerConnector implements SyncConnector {
+  constructor(
+    public readonly record: OctiServerCredentialRecord,
+    /**
+     * Per-install own-device UUID, sourced from
+     * {@code IdentitySettings.getOwnDeviceId()}. Shared across all connectors
+     * on this browser so a peer reaching us via multiple connectors dedups on
+     * the same `deviceId`. Passed in (not pulled lazily inside the class) so
+     * connector methods stay synchronous and side-effect-free.
+     */
+    private readonly _ownDeviceId: string,
+  ) {}
 
   get connectorId(): string {
     return this.record.connectorId;
   }
 
   get ownDeviceId(): string {
-    return this.record.ownDeviceId;
+    return this._ownDeviceId;
   }
 
   get server(): ServerAddress {
@@ -53,7 +61,7 @@ export class OctiServerConnector {
     return {
       accountId: this.record.accountId,
       devicePassword: this.record.devicePassword,
-      deviceId: this.record.ownDeviceId,
+      deviceId: this._ownDeviceId,
     };
   }
 
@@ -83,7 +91,7 @@ export class OctiServerConnector {
   readModulePayloadWithEtag(args: {
     targetDeviceId: string;
     moduleId: string;
-  }): Promise<{ bytes: Uint8Array; etag: string | null } | null> {
+  }): Promise<{ bytes: Uint8Array; etag: string | null; modifiedAt: Date | null } | null> {
     return readModulePayloadWithEtag({
       server: this.server,
       creds: this.creds,

@@ -4,6 +4,7 @@
   import { OFFICIAL_SERVERS, type ServerAddress } from "../protocol/models";
   import { generateAesGcmSivKeyset } from "../crypto/tink-keyset";
   import { credentialsRepo, type CredentialRecord } from "../storage/credentials-repo";
+  import { getOwnDeviceId } from "../storage/identity-settings";
   import { OCTI_WEB_VERSION } from "../version";
 
   type Choice = "PROD" | "BETA" | "CUSTOM";
@@ -40,7 +41,9 @@
 
     submitting = true;
     try {
-      const deviceId = crypto.randomUUID();
+      // Reuse the per-install own-device UUID across every connector this
+      // browser pairs with. App.svelte's bootstrap has already seeded it.
+      const deviceId = await getOwnDeviceId();
       const { bytes: keysetBytes } = generateAesGcmSivKeyset();
       const account = await createOrJoinAccount({
         server,

@@ -192,16 +192,26 @@ export async function readModulePayload(args: {
 }
 
 /**
- * As {@link readModulePayload} but also returns the strong ETag the server
- * advertised. Used by callers that intend to {@link commitModule} an updated
- * version of this module — they pass the etag back in `If-Match`.
+ * As {@link readModulePayload} but also returns the strong ETag and the
+ * server-side modification timestamp.
+ *
+ *   - {@code ETag} is opaque; callers pass it back as {@code If-Match} to
+ *     {@link commitModule} for conflict detection.
+ *   - {@code modifiedAt} comes from the {@code X-Modified-At} HTTP-date header
+ *     set by the sync-server's {@code ModuleRoute} ({@code octi-server} —
+ *     {@code call.response.header("X-Modified-At", …)}). It's the cross-
+ *     connector merge ordering key when web pairs with multiple Octi-server
+ *     accounts and the same peer device exists on more than one: newest
+ *     {@code modifiedAt} per {@code (deviceId, moduleId)} wins. {@code null}
+ *     when the header is absent (older server) or unparseable — callers
+ *     should treat that as the oldest possible timestamp.
  */
 export async function readModulePayloadWithEtag(args: {
   server: ServerAddress;
   creds: AuthCreds;
   targetDeviceId: string;
   moduleId: string;
-}): Promise<{ bytes: Uint8Array; etag: string | null } | null> {
+}): Promise<{ bytes: Uint8Array; etag: string | null; modifiedAt: Date | null } | null> {
   const url = moduleUrl(args.server, args.moduleId, args.targetDeviceId);
   const res = await fetch(url, {
     method: "GET",
@@ -216,7 +226,21 @@ export async function readModulePayloadWithEtag(args: {
   }
   const buf = await res.arrayBuffer();
   if (buf.byteLength === 0) return null;
-  return { bytes: new Uint8Array(buf), etag: res.headers.get("ETag") };
+  return {
+    bytes: new Uint8Array(buf),
+    etag: res.headers.get("ETag"),
+    modifiedAt: parseHttpDate(res.headers.get("X-Modified-At")),
+  };
+}
+
+/**
+ * Parse an HTTP-date string (RFC 7231 — Tue, 20 May 2026 18:00:00 GMT).
+ * Returns {@code null} on null / empty / unparseable input.
+ */
+function parseHttpDate(raw: string | null): Date | null {
+  if (!raw) return null;
+  const ms = Date.parse(raw);
+  return Number.isNaN(ms) ? null : new Date(ms);
 }
 
 /**

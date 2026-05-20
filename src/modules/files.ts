@@ -81,6 +81,13 @@ export function deserializeFileShareInfo(bytes: Uint8Array): FileShareInfo {
   };
 }
 
+export interface FetchPeerFileShareInfoResult {
+  /** Decoded FileShareInfo (empty shape rather than null on no-payload — simplifies merge). */
+  info: FileShareInfo;
+  /** Server-side modification timestamp (parsed from `X-Modified-At`), or null on no-payload / missing header. */
+  modifiedAt: Date | null;
+}
+
 /**
  * Fetch and decrypt one peer's FileShareInfo. Returns the empty shape (rather
  * than null) when the peer has no payload yet — simplifies the dashboard merge.
@@ -89,24 +96,28 @@ export async function fetchPeerFileShareInfo(args: {
   connector: OctiServerConnector;
   crypti: PayloadEncryption;
   peerDeviceId: string;
-}): Promise<FileShareInfo> {
-  const { info } = await fetchPeerFileShareInfoWithEtag(args);
-  return info;
+}): Promise<FetchPeerFileShareInfoResult> {
+  const { info, modifiedAt } = await fetchPeerFileShareInfoWithEtag(args);
+  return { info, modifiedAt };
 }
 
 async function fetchPeerFileShareInfoWithEtag(args: {
   connector: OctiServerConnector;
   crypti: PayloadEncryption;
   peerDeviceId: string;
-}): Promise<{ info: FileShareInfo; etag: string | null }> {
+}): Promise<{ info: FileShareInfo; etag: string | null; modifiedAt: Date | null }> {
   const result = await args.connector.readModulePayloadWithEtag({
     targetDeviceId: args.peerDeviceId,
     moduleId: FILES_MODULE_ID,
   });
-  if (!result) return { info: EMPTY_FILE_SHARE, etag: null };
+  if (!result) return { info: EMPTY_FILE_SHARE, etag: null, modifiedAt: null };
   const ad = buildAssociatedData(args.peerDeviceId, FILES_MODULE_ID);
   const plaintext = args.crypti.decrypt(result.bytes, ad);
-  return { info: deserializeFileShareInfo(plaintext), etag: result.etag };
+  return {
+    info: deserializeFileShareInfo(plaintext),
+    etag: result.etag,
+    modifiedAt: result.modifiedAt,
+  };
 }
 
 /**
