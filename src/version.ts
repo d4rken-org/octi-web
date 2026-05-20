@@ -43,3 +43,6 @@ export const OCTI_WEB_CHANNEL: "stable" | "canary" =
 
 /** ISO8601 timestamp captured at build start. Used in build-info diagnostics. */
 export const OCTI_WEB_BUILT_AT: string = env.VITE_BUILT_AT || "";
+
+/** Public source repository. Used by UI links (nav version pill, about, canary banner). */
+export const OCTI_WEB_REPO_URL: string = "https://github.com/d4rken-org/octi-web";

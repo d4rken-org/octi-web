@@ -5,6 +5,7 @@
   import { serverBaseUrl } from "../../protocol/models";
   import { OctiServerConnector } from "../../protocol/octi-server-connector";
   import { credentialsRepo, type CredentialRecord } from "../../storage/credentials-repo";
+  import { OCTI_WEB_REPO_URL } from "../../version";
   import CopyButton from "./CopyButton.svelte";
   import DetailRow from "./DetailRow.svelte";
   import Sheet from "./Sheet.svelte";
@@ -156,6 +157,14 @@
         <CopyButton value={fingerprintHex} label="Copy" />
       </div>
     {/if}
+  </section>
+
+  <section class="block">
+    <h3 class="h3">About</h3>
+    <p class="hint">
+      Octi Web is open source. Report issues, browse the changelog, or contribute on
+      <a href={OCTI_WEB_REPO_URL} target="_blank" rel="noopener noreferrer">GitHub</a>.
+    </p>
   </section>
 
   <section class="block">
