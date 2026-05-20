@@ -15,6 +15,7 @@ Android and desktop apps and renders peer device state on a dashboard.
 - [Testing](rules/testing.md) — vitest, colocated `*.test.ts`, fake-indexeddb, real-server smoke suite
 - [Build Commands](rules/build-commands.md) — pnpm scripts, svelte-check, vite build
 - [Commit Guidelines](rules/commit-guidelines.md) — Commit message format and examples
+- [Pull Request Guidelines](rules/pull-request-guidelines.md) — PR title, description, labels (canonical ref: sdmaid-se)
 - [Agent Instructions](rules/agent-instructions.md) — Common pitfalls, cross-peer interop rules, how to add a module
 - [Release](rules/release.md) — `release-prepare.yml` + `release-tag.yml`, `bump.sh`, channel mapping
 - [Device Capabilities](rules/device-capabilities.md) — Per-peer capability tag set: wire contract, namespaces, how to add new ones

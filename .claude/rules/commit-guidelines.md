@@ -42,27 +42,6 @@ Add crypto layer: Tink keyset parser + AES-GCM-SIV payload
 
 ## Pull Requests
 
-- Title follows the same rules as the commit subject. If the PR squashes to
-  one commit, the subject **is** the commit message.
-- Body: 1–3 bullet `## Summary` + a `## Test plan` checklist. Keep it
-  scannable; reviewers skim.
-- Link any sister PRs in other repos (Android `octi`, `octi-server`,
-  `octi-desktop`) so the wire-format change is reviewable end-to-end. See the
-  `Declare encryption capabilities…` commit for an example.
-- Open as draft only while CI is still red and you intend to keep iterating;
-  flip to ready when you want review.
-- **Apply labels**. Before/just after opening the PR, run `gh label list` and
-  attach every label that fits the change. The triage dashboards key off
-  these — an unlabeled PR is invisible to anyone scanning by area. Typical
-  matches for this repo:
-    - `documentation` — `.claude/`, `README`, rule files, inline docs only.
-    - `enhancement` — new user-visible feature or capability.
-    - `bug` — fixes incorrect behaviour.
-    - `Build/Deploy` — CI workflows, Dockerfile, release tooling, `tools/`.
-    - `c: sync/octi` — touches the Octi-Server connector / wire protocol.
-    - `c: module` and `c: module/<name>` — touches `src/modules/` (apply
-      both the umbrella and the specific one when the change is module-scoped).
-    - `Translations` — string changes only.
-  Apply more than one when the change spans areas. `gh pr edit <n>
-  --add-label foo --add-label bar` works post-creation; passing
-  `--label foo,bar` to `gh pr create` works at creation time.
+See [pull-request-guidelines.md](pull-request-guidelines.md). Commit titles
+and PR titles diverge here: commits speak to developers reading `git log`,
+PR titles speak to release-notes readers.
