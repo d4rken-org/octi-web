@@ -1,0 +1,140 @@
+name: Rolling canary build
+
+# Every push to main rebuilds the canary channel. Publishes the `:canary` Docker
+# image; the Pages canary subpath at web.octi.darken.eu/canary/ is deployed by
+# the separate deploy-pages.yml (workflow_run on this workflow's success).
+#
+# Naming follows the cross-vendor convention (Chrome Canary, GitHub canary
+# deploys). The companion in-app banner says "Canary build" + "This is a
+# bleeding edge build" — see src/ui/CanaryBanner.svelte.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Per-job concurrency (no workflow-level cancel) so publish can't be killed
+# mid-run by a fresh push. Stale-SHA guard inside the publish step aborts if
+# main has moved past us during the build window.
+
+jobs:
+  compute-version:
+    name: Compute canary version
+    runs-on: ubuntu-22.04
+    concurrency:
+      group: release-canary-build-${{ github.repository }}
+      cancel-in-progress: true
+    outputs:
+      version: ${{ steps.derive.outputs.version }}
+      short_sha: ${{ steps.derive.outputs.short_sha }}
+      should_run: ${{ steps.skip-check.outputs.should_run }}
+    steps:
+      - name: Guard ref must be main
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$REF" != "refs/heads/main" ]]; then
+            echo "::error::canary must run on main (got '$REF')"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Skip release-bump commits
+        id: skip-check
+        run: |
+          set -euo pipefail
+          msg=$(git log -1 --pretty=%s)
+          # The release-prepare workflow pushes commits titled "Release: vX.Y.Z".
+          # Canary must NOT publish those — the release-tag workflow is the
+          # only mover for stable, and a canary publish from the same commit
+          # could race ahead of release-tag's E2E gate.
+          if [[ "$msg" =~ ^Release: ]]; then
+            echo "::notice::skipping canary for release-bump commit: $msg"
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Derive canary version
+        id: derive
+        if: steps.skip-check.outputs.should_run == 'true'
+        run: |
+          set -euo pipefail
+          base=$(node -p "require('./package.json').version")
+          # Strip any -rc/-beta/-canary suffix from the package.json base. We want
+          # the X.Y.Z numeric core; -canary.<sha8> is appended below.
+          base_numeric=$(echo "$base" | sed -E 's/-(rc[0-9]+|beta[0-9]+|canary\.[0-9a-zA-Z]+)$//')
+          short=$(git rev-parse --short=8 HEAD)
+          echo "version=${base_numeric}-canary.${short}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${short}" >> "$GITHUB_OUTPUT"
+
+  build-and-publish-docker:
+    needs: [compute-version]
+    if: needs.compute-version.outputs.should_run == 'true'
+    name: Publish :canary Docker image (ghcr.io)
+    concurrency:
+      # Separate group from build so a fresh build cancelling an older build
+      # doesn't take this job down mid-publish.
+      group: release-canary-publish-${{ github.repository }}
+      cancel-in-progress: false
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Stale-SHA guard
+        # If main moved past us during the build window, abort. A newer canary
+        # run is on the way and we shouldn't move the `:canary` tag backwards.
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          actual=$(git rev-parse HEAD)
+          if [[ "$actual" != "$EXPECTED_SHA" ]]; then
+            echo "::warning::main moved during build window (was $EXPECTED_SHA, now $actual). Aborting canary publish — a newer run will replace this."
+            exit 1
+          fi
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3.6.1
+
+      - name: Build and push image
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6.9.0
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:canary
+            ghcr.io/${{ github.repository }}:canary-${{ needs.compute-version.outputs.short_sha }}
+          platforms: linux/amd64,linux/arm64
+          # Canary Docker images serve the SPA at root path (/) — the
+          # subpath-mounting only applies to GitHub Pages. Self-hosters who
+          # pull :canary get a fully-functional standalone build.
+          build-args: |
+            VITE_BASE=/
+            VITE_CHANNEL=canary
+            VITE_COMMIT_SHA=${{ github.sha }}
+            VITE_APP_VERSION=${{ needs.compute-version.outputs.version }}

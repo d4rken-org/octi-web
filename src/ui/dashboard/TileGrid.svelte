@@ -75,63 +75,71 @@
 </script>
 
 {#snippet renderTile(moduleId: string, wide: boolean)}
-  {#if moduleById(moduleId) == null}
-    <div class="missing">Unknown module: {moduleId}</div>
-  {:else if moduleId === POWER_MODULE_ID}
-    <PowerTile
-      info={data.power}
-      error={data.powerError}
-      {wide}
-      onOpen={() => onOpenSheet(moduleId)}
-    />
-  {:else if moduleId === WIFI_MODULE_ID}
-    <WifiTile
-      info={data.wifi}
-      error={data.wifiError}
-      {wide}
-      onOpen={() => onOpenSheet(moduleId)}
-    />
-  {:else if moduleId === CONNECTIVITY_MODULE_ID}
-    <ConnectivityTile
-      info={data.connectivity}
-      error={data.connectivityError}
-      {wide}
-      onOpen={() => onOpenSheet(moduleId)}
-    />
-  {:else if moduleId === CLIPBOARD_MODULE_ID}
-    <ClipboardTile
-      info={data.clipboard}
-      error={data.clipboardError}
-      {isSelf}
-      {wide}
-      onOpen={() => onOpenSheet(moduleId)}
-      onPasteOsAndPublish={isSelf ? onClipboardPasteOs : undefined}
-    />
-  {:else if moduleId === FILES_MODULE_ID}
-    <FilesTile
-      info={data.fileShare}
-      error={data.fileShareError}
-      {isSelf}
-      {wide}
-      {ownConnectorId}
-      onOpen={() => onOpenSheet(moduleId)}
-      onPickUpload={isSelf ? onFilesPickUpload : undefined}
-    />
-  {:else if moduleId === APPS_MODULE_ID}
-    <AppsTile
-      info={data.apps}
-      error={data.appsError}
-      {wide}
-      onOpen={() => onOpenSheet(moduleId)}
-    />
-  {:else if moduleId === META_MODULE_ID}
-    <MetaTile
-      info={data.meta}
-      error={data.metaError}
-      {wide}
-      onOpen={() => onOpenSheet(moduleId)}
-    />
-  {/if}
+  <!--
+    Per-tile wrapper for screenshot CI selectors. `display: contents` makes the
+    wrapper invisible to the grid layout — its child (the tile button) keeps
+    occupying the grid cell directly. Playwright clicks land on the wrapper or
+    the inner button identically.
+  -->
+  <div class="tile-wrapper" data-testid="tile" data-module-id={moduleId}>
+    {#if moduleById(moduleId) == null}
+      <div class="missing">Unknown module: {moduleId}</div>
+    {:else if moduleId === POWER_MODULE_ID}
+      <PowerTile
+        info={data.power}
+        error={data.powerError}
+        {wide}
+        onOpen={() => onOpenSheet(moduleId)}
+      />
+    {:else if moduleId === WIFI_MODULE_ID}
+      <WifiTile
+        info={data.wifi}
+        error={data.wifiError}
+        {wide}
+        onOpen={() => onOpenSheet(moduleId)}
+      />
+    {:else if moduleId === CONNECTIVITY_MODULE_ID}
+      <ConnectivityTile
+        info={data.connectivity}
+        error={data.connectivityError}
+        {wide}
+        onOpen={() => onOpenSheet(moduleId)}
+      />
+    {:else if moduleId === CLIPBOARD_MODULE_ID}
+      <ClipboardTile
+        info={data.clipboard}
+        error={data.clipboardError}
+        {isSelf}
+        {wide}
+        onOpen={() => onOpenSheet(moduleId)}
+        onPasteOsAndPublish={isSelf ? onClipboardPasteOs : undefined}
+      />
+    {:else if moduleId === FILES_MODULE_ID}
+      <FilesTile
+        info={data.fileShare}
+        error={data.fileShareError}
+        {isSelf}
+        {wide}
+        {ownConnectorId}
+        onOpen={() => onOpenSheet(moduleId)}
+        onPickUpload={isSelf ? onFilesPickUpload : undefined}
+      />
+    {:else if moduleId === APPS_MODULE_ID}
+      <AppsTile
+        info={data.apps}
+        error={data.appsError}
+        {wide}
+        onOpen={() => onOpenSheet(moduleId)}
+      />
+    {:else if moduleId === META_MODULE_ID}
+      <MetaTile
+        info={data.meta}
+        error={data.metaError}
+        {wide}
+        onOpen={() => onOpenSheet(moduleId)}
+      />
+    {/if}
+  </div>
 {/snippet}
 
 <div class="grid">
@@ -172,6 +180,14 @@
   }
   .row.pair {
     grid-template-columns: 1fr 1fr;
+  }
+  /*
+   * Per-tile wrapper for screenshot CI selectors. {@code display: contents}
+   * makes the wrapper transparent to the row's grid layout, so the inner tile
+   * button continues to be the grid item.
+   */
+  .tile-wrapper {
+    display: contents;
   }
   .empty {
     padding: 24px;

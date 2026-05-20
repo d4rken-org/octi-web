@@ -32,6 +32,23 @@ that URL in any modern browser and pair via paste-link or QR — your existing O
 
 A self-hosted copy of Octi Web *cannot* reach the official server.
 
+### Canary (bleeding edge)
+
+A rolling **canary** build rides every push to `main`. Visit
+**[web.octi.darken.eu/canary/](https://web.octi.darken.eu/canary/)** if you want the latest
+features before they ship to stable. The page shows a banner identifying the channel + the
+exact commit it was built from.
+
+Caveats:
+
+- Canary and stable share the same domain but use isolated browser storage. Pairing the
+  canary URL registers a new device on your sync account, separate from the stable one.
+- Canary may break, drop data, or change shape without warning. If something looks wrong on
+  canary, fall back to [web.octi.darken.eu](https://web.octi.darken.eu).
+
+The canary Docker image is `ghcr.io/d4rken-org/octi-web:canary` (refreshed on every push to
+`main`).
+
 ### With a self-hosted sync-server
 
 If you run your own [octi-server](https://github.com/d4rken-org/octi-server) you have

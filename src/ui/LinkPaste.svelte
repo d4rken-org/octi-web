@@ -61,6 +61,7 @@
       bind:value={pasted}
       rows="5"
       placeholder="Paste the base64 link payload from your other device"
+      data-testid="paste-textarea"
     ></textarea>
   </label>
 
@@ -70,7 +71,7 @@
   </label>
 
   <div style="display: flex; gap: 0.5rem; margin-top: 1rem;">
-    <button onclick={submit} disabled={submitting}>
+    <button data-testid="paste-submit" onclick={submit} disabled={submitting}>
       {submitting ? "Joining…" : "Join account"}
     </button>
   </div>

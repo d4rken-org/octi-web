@@ -34,7 +34,18 @@
 
 <header class="nav">
   <div class="identity">
-    <img class="brand-icon" src="/icons/octi-192.png" width="36" height="36" alt="" />
+    <!--
+      BASE_URL resolves to "/" on stable, "/canary/" on the canary channel
+      build, so the icon URL stays correct when the SPA is served from a
+      subpath.
+    -->
+    <img
+      class="brand-icon"
+      src="{import.meta.env.BASE_URL}icons/octi-192.png"
+      width="36"
+      height="36"
+      alt=""
+    />
     <div class="identity-text">
       <h1 class="title">Octi Web</h1>
       <div class="subtitle">{accountSubtitle}</div>
@@ -61,6 +72,7 @@
       type="button"
       class="icon-btn"
       aria-label="Settings"
+      data-testid="nav-settings"
       onclick={onOpenSettings}
     >
       <Icon name="settings" size={18} />

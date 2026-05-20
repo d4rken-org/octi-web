@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { onMount } from "svelte";
+
   import CreateAccount from "./CreateAccount.svelte";
   import LinkPaste from "./LinkPaste.svelte";
   import LinkScan from "./LinkScan.svelte";
@@ -8,6 +10,18 @@
   let mode = $state<Mode>("choose");
 
   let { onDone }: { onDone: () => void } = $props();
+
+  // Marker for screenshot CI (Playwright). The mount path is synchronous; the
+  // screen is ready as soon as the script runs.
+  onMount(() => {
+    document.documentElement.setAttribute("data-screenshot-ready", "onboarding");
+    return () => {
+      // Clear when this screen unmounts so the next screen's ready signal can settle.
+      if (document.documentElement.getAttribute("data-screenshot-ready") === "onboarding") {
+        document.documentElement.removeAttribute("data-screenshot-ready");
+      }
+    };
+  });
 </script>
 
 <section class="route-narrow">
@@ -19,7 +33,7 @@
 
     <div style="display: grid; gap: 0.75rem; margin-top: 1rem; max-width: 320px;">
       <button onclick={() => (mode = "create")}>Create a new account</button>
-      <button onclick={() => (mode = "paste")}>Link by paste</button>
+      <button data-testid="onboarding-paste" onclick={() => (mode = "paste")}>Link by paste</button>
       <button onclick={() => (mode = "scan")}>Link by QR scan</button>
     </div>
   {:else}
