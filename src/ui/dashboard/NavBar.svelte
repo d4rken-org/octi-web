@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { OCTI_WEB_REPO_URL } from "../../version";
   import Icon from "./Icon.svelte";
   import OverflowMenu, { type MenuItem } from "./OverflowMenu.svelte";
 
@@ -30,6 +31,8 @@
     onOpenSettings: () => void;
     menuItems: MenuItem[];
   } = $props();
+
+  const releaseUrl = $derived(`${OCTI_WEB_REPO_URL}/releases/tag/v${version}`);
 </script>
 
 <header class="nav">
@@ -52,7 +55,15 @@
     </div>
   </div>
   <div class="pills">
-    <span class="pill" title="octi-web version">v{version}</span>
+    <a
+      class="pill pill-link"
+      href={releaseUrl}
+      target="_blank"
+      rel="noopener noreferrer"
+      title="View release notes on GitHub"
+    >
+      v{version}
+    </a>
     <span class="pill last-sync" title="Last successful sync">
       {loading ? "Syncing…" : `Sync: ${lastSyncLabel}`}
     </span>
@@ -149,6 +160,15 @@
     border-radius: 999px;
     line-height: 1.2;
     white-space: nowrap;
+  }
+  .pill-link {
+    text-decoration: none;
+    cursor: pointer;
+  }
+  .pill-link:hover,
+  .pill-link:focus-visible {
+    color: var(--md-color-on-surface);
+    background: color-mix(in srgb, var(--md-color-on-surface) 12%, transparent);
   }
 
   .actions {

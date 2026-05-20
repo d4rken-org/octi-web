@@ -1,11 +1,11 @@
 <script lang="ts">
-  import { OCTI_WEB_CHANNEL, OCTI_WEB_GIT_SHA } from "../version";
+  import { OCTI_WEB_CHANNEL, OCTI_WEB_GIT_SHA, OCTI_WEB_REPO_URL } from "../version";
 
   // Static at module load — channel/sha are baked into the bundle at build time
   // and don't change while the SPA runs.
   const isCanary = OCTI_WEB_CHANNEL === "canary";
   const shortSha = (OCTI_WEB_GIT_SHA || "dev").slice(0, 7);
-  const commitUrl = `https://github.com/d4rken-org/octi-web/commit/${OCTI_WEB_GIT_SHA}`;
+  const commitUrl = `${OCTI_WEB_REPO_URL}/commit/${OCTI_WEB_GIT_SHA}`;
 </script>
 
 {#if isCanary}
