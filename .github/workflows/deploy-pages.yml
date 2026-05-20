@@ -1,0 +1,156 @@
+name: Deploy Pages (both channels)
+
+# Atomic full-replacement Pages deploy with TWO channels in one site:
+#
+#   web.octi.darken.eu/         ← stable (latest GitHub Release tag)
+#   web.octi.darken.eu/canary/  ← canary (main HEAD)
+#
+# Pages doesn't support partial-replacement, so every deploy rebuilds BOTH
+# channels and uploads the combined tree. Triggers:
+#   - workflow_run from Tagged releases (after release-github lands a tag)
+#   - workflow_run from Rolling canary build (after :canary Docker publishes)
+#   - workflow_dispatch (manual)
+#
+# Note: no `branches:` filter on workflow_run — tag-triggered runs do NOT fire
+# on the `main` branch (they fire on the tag ref), so a branch filter would
+# silently skip release-tag's deploy. We gate inside the job instead.
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Tagged releases", "Rolling canary build"]
+    types: [completed]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build both channels and deploy
+    # workflow_dispatch always proceeds; workflow_run only when the upstream
+    # workflow succeeded (skipping cancelled / failed upstreams).
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-22.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      # Setup pnpm + Node ONCE at the runner level. Common-setup is repo-root
+      # oriented; this job builds in two subdirs (stable-src, canary-src), so
+      # tooling needs to be on the runner PATH, not inside either checkout.
+      - name: Setup pnpm
+        uses: pnpm/action-setup@d15e628c4d6a05a73e0b2cf3464030fc8ce28a36 # v6.0.8
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@48b55a01c7f0d0e7c8d65d9c3b1ad81e44f9d6cc # v6.4.0
+        with:
+          node-version: 22
+          # No `cache: pnpm` — without a top-level lockfile in cwd, the cache
+          # config errors. Each subdir runs `pnpm install` independently.
+
+      - name: Determine latest release tag
+        id: latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Most recent release — includes prereleases. The current v0.1.0-rc1
+          # is a prerelease (no v1.0.0 yet), so we can't filter by --exclude-pre-releases.
+          tag=$(gh release list --repo "${GITHUB_REPOSITORY}" --limit 1 --json tagName --jq '.[0].tagName')
+          if [[ -z "$tag" || "$tag" == "null" ]]; then
+            echo "::error::No release tag yet — stable channel cannot be built."
+            echo "::error::Cut a tag via release-prepare.yml before dispatching this workflow."
+            exit 1
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "[stable] resolved tag=${tag}"
+
+      - name: Checkout stable @ latest tag
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ steps.latest.outputs.tag }}
+          persist-credentials: false
+          path: stable-src
+
+      - name: Install stable deps
+        working-directory: stable-src
+        run: pnpm install --frozen-lockfile
+
+      - name: Build stable
+        working-directory: stable-src
+        env:
+          VITE_BASE: "/"
+          VITE_CHANNEL: stable
+          VITE_APP_VERSION: ${{ steps.latest.outputs.tag }}
+        run: |
+          set -euo pipefail
+          export VITE_COMMIT_SHA=$(git rev-parse HEAD)
+          pnpm build
+
+      - name: Checkout canary @ main HEAD
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          persist-credentials: false
+          path: canary-src
+
+      - name: Install canary deps
+        working-directory: canary-src
+        run: pnpm install --frozen-lockfile
+
+      - name: Compute canary version
+        id: canary-version
+        working-directory: canary-src
+        run: |
+          set -euo pipefail
+          base=$(node -p "require('./package.json').version")
+          base_numeric=$(echo "$base" | sed -E 's/-(rc[0-9]+|beta[0-9]+|canary\.[0-9a-zA-Z]+)$//')
+          short=$(git rev-parse --short=8 HEAD)
+          sha=$(git rev-parse HEAD)
+          echo "version=${base_numeric}-canary.${short}" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=${sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Build canary
+        working-directory: canary-src
+        env:
+          VITE_BASE: "/canary/"
+          VITE_CHANNEL: canary
+          VITE_APP_VERSION: ${{ steps.canary-version.outputs.version }}
+          VITE_COMMIT_SHA: ${{ steps.canary-version.outputs.commit_sha }}
+        run: pnpm build
+
+      - name: Combine channels + CNAME
+        run: |
+          set -euo pipefail
+          mkdir -p combined
+          cp -r stable-src/dist/. combined/
+          cp -r canary-src/dist combined/canary
+          echo "web.octi.darken.eu" > combined/CNAME
+          # Carry committed screenshots/ from the stable tag's tree into the
+          # deploy so the README references resolve when viewed via Pages too.
+          if [[ -d stable-src/screenshots ]]; then
+            cp -r stable-src/screenshots combined/
+          fi
+          ls -la combined/
+
+      - name: Configure Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: combined/
+
+      - name: Deploy to Pages
+        id: deploy
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

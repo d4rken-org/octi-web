@@ -54,6 +54,16 @@
   let fingerprintHex = $state<string | null>(null);
   let fingerprintError = $state<string | null>(null);
 
+  // Screenshot-CI marker. Sync $effect — async onMount can't return a teardown.
+  $effect(() => {
+    document.documentElement.setAttribute("data-screenshot-ready", "settings");
+    return () => {
+      if (document.documentElement.getAttribute("data-screenshot-ready") === "settings") {
+        document.documentElement.setAttribute("data-screenshot-ready", "dashboard");
+      }
+    };
+  });
+
   onMount(async () => {
     try {
       // Pass the Uint8Array directly to subtle.digest — passing .buffer would

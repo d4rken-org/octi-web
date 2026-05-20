@@ -7,3 +7,11 @@ dist
 .claude/
 .idea/
 .vscode/
+
+# Playwright + bootstrap-peer artifacts. The committed screenshots/ tree is
+# populated by the release-tag.yml workflow via the screenshots/refresh PR;
+# local Playwright runs land in the same path and shouldn't be staged.
+bootstrap-peer.json
+test-results/
+playwright-report/
+

@@ -12,6 +12,8 @@
     disabled?: boolean;
     destructive?: boolean;
     separatorBefore?: boolean;
+    /** Optional stable selector for screenshot CI. */
+    testId?: string;
   }
 </script>
 
@@ -87,6 +89,7 @@
     aria-haspopup="menu"
     aria-expanded={open}
     onclick={toggle}
+    data-testid="overflow-menu"
   >
     <Icon name="more" size={18} />
   </button>
@@ -102,6 +105,7 @@
           class:destructive={item.destructive}
           role="menuitem"
           disabled={item.disabled}
+          data-testid={item.testId}
           onclick={() => handle(item)}
         >{item.label}</button>
       {/each}

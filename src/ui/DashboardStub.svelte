@@ -436,6 +436,17 @@
     sortDevicesSelfFirst(devices ?? [], activeRecord.ownDeviceId),
   );
 
+  // Screenshot-CI marker. Set once the first refresh has completed (devices
+  // non-null, loading false) so Playwright can wait deterministically. Per-tile
+  // decode errors surface as `.banner.err` / per-tile error markers — the
+  // Playwright spec asserts those are absent before capturing, so the global
+  // "dashboard ready" signal here just gates on the device list being present.
+  $effect(() => {
+    if (devices !== null && !loading) {
+      document.documentElement.setAttribute("data-screenshot-ready", "dashboard");
+    }
+  });
+
   // Nav subtitle: signed-in label + bare server domain. Full URL lives in
   // Settings; the domain is enough at-a-glance to tell which sync-server is
   // active without cluttering the header.
@@ -501,6 +512,7 @@
         {@const layout = tileLayouts[d.raw.id]}
         {#if layout}
           <DeviceCard
+            deviceId={d.raw.id}
             deviceLabel={d.raw.label ?? "(no label)"}
             devicePlatform={d.raw.platform ?? "unknown"}
             lastSeen={d.raw.lastSeen}

@@ -49,11 +49,29 @@
     document.body.style.overflow = "hidden";
     await tick();
     dialogEl?.focus();
+
+    // Screenshot-CI marker: set once the sheet has settled. Under
+    // prefers-reduced-motion the slide-in animation is disabled (see CSS), so
+    // a single tick is enough. Otherwise, wait for the animationend.
+    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    const markReady = () => {
+      document.documentElement.setAttribute("data-screenshot-ready", "tile-detail");
+    };
+    if (reduceMotion) {
+      markReady();
+    } else {
+      dialogEl?.addEventListener("animationend", markReady, { once: true });
+      // Fallback in case animationend doesn't fire (e.g. animation disabled at the OS level).
+      setTimeout(markReady, 600);
+    }
   });
 
   onDestroy(() => {
     if (priorBodyOverflow !== null) {
       document.body.style.overflow = priorBodyOverflow;
+    }
+    if (document.documentElement.getAttribute("data-screenshot-ready") === "tile-detail") {
+      document.documentElement.setAttribute("data-screenshot-ready", "dashboard");
     }
   });
 </script>
@@ -200,5 +218,18 @@
     padding: 8px 20px 20px;
     overflow-y: auto;
     flex: 1;
+  }
+
+  /*
+   * Honor the user's OS-level motion preference: disable the entrance
+   * animations entirely so the sheet appears in its final position. Also
+   * makes the screenshot-CI capture deterministic — no partial-animation
+   * frames sneaking into the screenshot.
+   */
+  @media (prefers-reduced-motion: reduce) {
+    .backdrop,
+    .sheet {
+      animation: none !important;
+    }
   }
 </style>

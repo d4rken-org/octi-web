@@ -1,5 +1,7 @@
 import { openDB, type DBSchema, type IDBPDatabase } from "idb";
 
+import { OCTI_WEB_CHANNEL } from "../version";
+
 /**
  * Mirrors the per-device subset of {@link eu.darken.octi.syncs.octiserver.core.OctiServer.Credentials}
  * plus the locally-generated {@code ownDeviceId} that the Android app keeps in its sync settings.
@@ -39,10 +41,23 @@ interface OctiWebDB extends DBSchema {
   };
 }
 
-const DB_NAME = "octi-web";
+/**
+ * Channel-scoped storage keys. Canary and stable share the same origin
+ * ({@code web.octi.darken.eu}) and therefore the same IndexedDB / localStorage,
+ * so the channel suffix isolates them: a schema upgrade on canary can't open
+ * the DB at a higher version than stable code is prepared to handle. Channels
+ * are independent devices on the sync account; pairing both gives the user two
+ * device records on the same account.
+ *
+ * Pre-channel-suffix builds used the unsuffixed {@code "octi-web"} DB. New
+ * builds (stable or canary) never touch the legacy DB — users who linked
+ * before channels existed retain their old data only as long as they keep
+ * running the pre-canary build.
+ */
+const DB_NAME = `octi-web-${OCTI_WEB_CHANNEL}`;
 const DB_VERSION = 1;
 const STORE = "credentials";
-const ACTIVE_ACCOUNT_KEY = "octi-web.active-account-id";
+const ACTIVE_ACCOUNT_KEY = `octi-web.${OCTI_WEB_CHANNEL}.active-account-id`;
 
 let dbPromise: Promise<IDBPDatabase<OctiWebDB>> | null = null;
 

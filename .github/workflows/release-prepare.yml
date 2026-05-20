@@ -99,6 +99,7 @@ jobs:
             "Production build"
             "Smoke (real sync-server)"
             "Release tooling"
+            "E2E smoke"
           )
           for expected in "${expected_checks[@]}"; do
             ok=$(echo "$checks" | jq --arg n "$expected" '[.[] | select(.name == $n and .conclusion == "success")] | length')

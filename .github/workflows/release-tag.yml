@@ -1,5 +1,10 @@
 name: Tagged releases
 
+# Sequential publish: e2e → docker → github-release → screenshots-pr. The
+# GitHub Release lands LAST so a Docker-push failure can't strand the project
+# with an immutable Release pointing at a non-existent image. Pages deployment
+# is decoupled into deploy-pages.yml — it runs from a workflow_run trigger.
+
 on:
   push:
     tags:
@@ -63,92 +68,90 @@ jobs:
             exit 1
           fi
 
-  release-github:
+  e2e:
     needs: validate-tag
-    name: Create GitHub release
-    permissions:
-      contents: write
+    name: E2E + screenshots (real sync-server)
     runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    # Boots the same digest-pinned sync-server the smoke job uses, seeds a fake
+    # Pixel 7 peer, drives the SPA through Playwright, captures screenshots.
+    # Failure here BLOCKS docker/github-release/pages — see job ordering below.
+    services:
+      sync-server:
+        image: ghcr.io/d4rken-org/octi-server@sha256:3829efba5ca5a4d407a0d0a048b8d0c20264ad2f9e389aa087c857ea0d0bddaa
+        ports:
+          - 18080:8080
+        env:
+          OCTI_CORS_ALLOWED_ORIGINS: 'http://127.0.0.1:4173,http://localhost:4173'
     steps:
       - name: Checkout source code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          fetch-depth: 0
-          persist-credentials: false
+        with: { persist-credentials: false }
 
       - name: Setup environment
         uses: ./.github/actions/common-setup
 
-      - name: Build production bundle
-        run: pnpm build
-
-      - name: Package dist tarball
-        env:
-          REF_NAME: ${{ github.ref_name }}
+      - name: Wait for sync-server
         run: |
           set -euo pipefail
-          tar -czf "octi-web-${REF_NAME}.tar.gz" -C dist .
-          ls -la "octi-web-${REF_NAME}.tar.gz"
+          for attempt in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:18080/v1/status > /dev/null; then
+              echo "sync-server up after ${attempt}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "sync-server did not respond within 30s" >&2
+          docker logs ${{ job.services.sync-server.id }} || true
+          exit 1
 
-      # Use `gh release create` directly so the release is created WITH its assets
-      # in a single API call. softprops/action-gh-release creates-then-attaches,
-      # which fails on repos with "Immutable Releases" enabled (the release is
-      # frozen at creation time and assets can't be added after the fact).
-      - name: Create release with assets
+      - name: Bootstrap fake phone peer
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          flags=(
-            --title "${REF_NAME}"
-            --generate-notes
-          )
-          # Pre-release for -rc/-beta tags (anything with a suffix); stable for vM.m.p.
-          if [[ "${REF_NAME}" == *-* ]]; then
-            flags+=(--prerelease)
-          else
-            flags+=(--latest)
-          fi
-          gh release create "${REF_NAME}" "${flags[@]}" "octi-web-${REF_NAME}.tar.gz"
+          SYNC_SERVER_URL: http://127.0.0.1:18080
+          OUTPUT_PATH: bootstrap-peer.json
+        run: pnpm bootstrap-peer
 
-  release-pages:
-    needs: validate-tag
-    name: Deploy to GitHub Pages
-    runs-on: ubuntu-22.04
-    permissions:
-      contents: read
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
-    steps:
-      - name: Checkout source code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install --with-deps chromium
 
-      - name: Setup environment
-        uses: ./.github/actions/common-setup
-
-      - name: Build production bundle
+      - name: Build SPA (stable channel, tag version)
+        env:
+          VITE_CHANNEL: stable
+          VITE_COMMIT_SHA: ${{ github.sha }}
+          VITE_APP_VERSION: ${{ github.ref_name }}
         run: pnpm build
 
-      - name: Configure Pages
-        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - name: Run E2E screenshot capture
+        env:
+          BOOTSTRAP_PEER_FILE: bootstrap-peer.json
+        run: pnpm e2e
 
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+      - name: Generate thumbnails
+        run: pnpm exec node scripts/generate-thumbs.mjs
+
+      - name: Upload screenshots artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          path: dist/
+          name: screenshots-${{ github.ref_name }}
+          path: screenshots/
+          retention-days: 14
 
-      - name: Deploy to Pages
-        id: deploy
-        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
+      - name: Upload Playwright trace on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: playwright-trace-${{ github.run_id }}
+          path: |
+            test-results/
+            playwright-report/
+          if-no-files-found: ignore
+
+      - name: Dump sync-server logs on failure
+        if: failure()
+        run: docker logs ${{ job.services.sync-server.id }} || true
 
   release-docker:
-    needs: validate-tag
+    needs: e2e
     name: Publish Docker image (ghcr.io)
     runs-on: ubuntu-22.04
     permissions:
@@ -198,3 +201,139 @@ jobs:
           push: true
           tags: ${{ steps.tags.outputs.list }}
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            VITE_BASE=/
+            VITE_CHANNEL=stable
+            VITE_COMMIT_SHA=${{ github.sha }}
+            VITE_APP_VERSION=${{ github.ref_name }}
+
+  release-github:
+    needs: release-docker
+    name: Create GitHub release
+    permissions:
+      contents: write
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup environment
+        uses: ./.github/actions/common-setup
+
+      - name: Build production bundle
+        env:
+          VITE_CHANNEL: stable
+          VITE_COMMIT_SHA: ${{ github.sha }}
+          VITE_APP_VERSION: ${{ github.ref_name }}
+        run: pnpm build
+
+      - name: Package dist tarball
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          tar -czf "octi-web-${REF_NAME}.tar.gz" -C dist .
+          ls -la "octi-web-${REF_NAME}.tar.gz"
+
+      # Use `gh release create` directly so the release is created WITH its assets
+      # in a single API call. softprops/action-gh-release creates-then-attaches,
+      # which fails on repos with "Immutable Releases" enabled (the release is
+      # frozen at creation time and assets can't be added after the fact).
+      - name: Create release with assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          flags=(
+            --title "${REF_NAME}"
+            --generate-notes
+          )
+          # Pre-release for -rc/-beta tags (anything with a suffix); stable for vM.m.p.
+          if [[ "${REF_NAME}" == *-* ]]; then
+            flags+=(--prerelease)
+          else
+            flags+=(--latest)
+          fi
+          gh release create "${REF_NAME}" "${flags[@]}" "octi-web-${REF_NAME}.tar.gz"
+
+  screenshots-pr:
+    needs: release-github
+    name: Open screenshots PR
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - name: Mint App token
+        # Same App as release-prepare — needed to bypass main branch ruleset
+        # protection when pushing the screenshots/refresh branch.
+        id: app-token
+        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
+        with:
+          client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+      - name: Resolve bot identity
+        id: bot
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+          user_id=$(gh api "/users/${APP_SLUG}%5Bbot%5D" --jq .id)
+          echo "user_name=${APP_SLUG}[bot]" >> "$GITHUB_OUTPUT"
+          echo "user_email=${user_id}+${APP_SLUG}[bot]@users.noreply.github.com" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout main (App-authenticated)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          fetch-depth: 1
+          persist-credentials: true
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Setup environment
+        uses: ./.github/actions/common-setup
+
+      - name: Download screenshots artifact (from this run)
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v5.0.0
+        with:
+          name: screenshots-${{ github.ref_name }}
+          path: screenshots/
+
+      - name: Re-generate thumbnails defensively
+        run: pnpm exec node scripts/generate-thumbs.mjs
+
+      - name: Open / refresh PR
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REF_NAME: ${{ github.ref_name }}
+          BOT_USER_NAME: ${{ steps.bot.outputs.user_name }}
+          BOT_USER_EMAIL: ${{ steps.bot.outputs.user_email }}
+        run: |
+          set -euo pipefail
+          git config user.name "${BOT_USER_NAME}"
+          git config user.email "${BOT_USER_EMAIL}"
+          # Fixed branch name → at most one open "screenshots/refresh" PR exists.
+          # Each new release force-updates the branch with the new PNGs.
+          branch="screenshots/refresh"
+          git checkout -B "${branch}"
+          git add screenshots/
+          if git diff --staged --quiet; then
+            echo "No screenshot changes — nothing to PR."
+            exit 0
+          fi
+          git commit -m "Refresh screenshots for ${REF_NAME}"
+          git push --force --set-upstream origin "${branch}"
+          # Open or update the PR (gh pr create errors if one already exists for
+          # the branch; in that case the push above already updated the diff).
+          if gh pr view "${branch}" >/dev/null 2>&1; then
+            echo "PR already open for ${branch}; force-push updated it."
+          else
+            gh pr create --base main --head "${branch}" \
+              --title "Refresh screenshots (${REF_NAME})" \
+              --body "Automated refresh from the ${REF_NAME} release. Review the diffs and merge if the new shots look right."
+          fi

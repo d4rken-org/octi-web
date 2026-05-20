@@ -2,6 +2,12 @@
 import "fake-indexeddb/auto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { CredentialsRepo, type CredentialRecord } from "./credentials-repo";
+import { OCTI_WEB_CHANNEL } from "../version";
+
+// Mirror the channel-scoped names from credentials-repo.ts. Tests run with
+// VITE_CHANNEL unset → channel = "stable".
+const DB_NAME = `octi-web-${OCTI_WEB_CHANNEL}`;
+const ACTIVE_ACCOUNT_KEY = `octi-web.${OCTI_WEB_CHANNEL}.active-account-id`;
 
 function makeRecord(overrides: Partial<CredentialRecord> = {}): CredentialRecord {
   return {
@@ -52,7 +58,7 @@ describe("CredentialsRepo", () => {
     const repo = new CredentialsRepo();
     await repo.save(makeRecord({ accountId: "ghost" }));
     // Out-of-band delete: drop the record but leave the active-pointer.
-    const db = await indexedDB.open("octi-web", 1);
+    const db = await indexedDB.open(DB_NAME, 1);
     await new Promise<void>((resolve, reject) => {
       db.addEventListener("success", () => {
         const tx = db.result.transaction("credentials", "readwrite");
@@ -65,11 +71,11 @@ describe("CredentialsRepo", () => {
       });
       db.addEventListener("error", () => reject(db.error));
     });
-    expect(localStorage.getItem("octi-web.active-account-id")).toBe("ghost");
+    expect(localStorage.getItem(ACTIVE_ACCOUNT_KEY)).toBe("ghost");
     const result = await repo.getActive();
     expect(result).toBeUndefined();
     // Stale pointer scrubbed.
-    expect(localStorage.getItem("octi-web.active-account-id")).toBeNull();
+    expect(localStorage.getItem(ACTIVE_ACCOUNT_KEY)).toBeNull();
   });
 
   it("listAll returns every stored record regardless of which is active", async () => {
@@ -97,6 +103,6 @@ describe("CredentialsRepo", () => {
     await repo.save(makeRecord({ accountId: "b" }));
     await repo.wipe();
     expect(await repo.listAll()).toEqual([]);
-    expect(localStorage.getItem("octi-web.active-account-id")).toBeNull();
+    expect(localStorage.getItem(ACTIVE_ACCOUNT_KEY)).toBeNull();
   });
 });

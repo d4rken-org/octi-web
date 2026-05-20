@@ -30,6 +30,7 @@
    * the open/close state is tied to a single device's interaction.
    */
   let {
+    deviceId,
     deviceLabel,
     devicePlatform,
     lastSeen,
@@ -44,6 +45,8 @@
     onDownloadFile,
     onFilesUploadCallback,
   }: {
+    /** Server-side device id. Surfaced on the card root for screenshot CI selectors. */
+    deviceId: string;
     deviceLabel: string;
     devicePlatform: string;
     lastSeen: string | null;
@@ -128,7 +131,7 @@
   }
 </script>
 
-<article class="card" class:self={isSelf}>
+<article class="card" class:self={isSelf} data-testid="device-card" data-device-id={deviceId}>
   <header class="header">
     <span class="device-icon" aria-hidden="true">
       <Icon name={deviceIcon(devicePlatform, data.meta)} size={22} />
@@ -142,7 +145,7 @@
         {devicePlatform} · last seen {formatLastSeen(lastSeen)}
       </div>
     </div>
-    <OverflowMenu items={[{ label: "Edit tiles", onClick: startEdit }]} />
+    <OverflowMenu items={[{ label: "Edit tiles", onClick: startEdit, testId: "edit-tiles-button" }]} />
   </header>
 
   <div class="body">

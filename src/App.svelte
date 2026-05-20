@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
 
+  import CanaryBanner from "./ui/CanaryBanner.svelte";
   import Onboarding from "./ui/Onboarding.svelte";
   import DashboardStub from "./ui/DashboardStub.svelte";
   import { credentialsRepo, type CredentialRecord } from "./storage/credentials-repo";
@@ -20,6 +21,8 @@
     }
   });
 </script>
+
+<CanaryBanner />
 
 <main>
   {#if bootstrapping}
