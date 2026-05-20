@@ -1,11 +1,10 @@
 import { buildAssociatedData, type PayloadEncryption } from "../crypto/payload";
-import { type AuthCreds, readModulePayloadWithEtag } from "../protocol/octi-api";
-import type { ServerAddress } from "../protocol/models";
+import type { OctiServerConnector } from "../protocol/octi-server-connector";
 
 /**
  * Generic module-payload fetcher used by the registry-driven dashboard refresh.
  *
- * - Fetches the encrypted module payload via the existing octi-api wrapper.
+ * - Fetches the encrypted module payload via the supplied connector.
  * - Decrypts with the per-account payload cipher and runs the supplied `decode`.
  * - Holds the last (etag, decoded) pair per (deviceId, moduleId) so polls that
  *   return the same etag can skip the JSON.parse + decode work. Bandwidth still
@@ -40,8 +39,13 @@ export function createEtagCache<I = unknown>(): EtagCache<I> {
   };
 }
 
-export function cacheKey(deviceId: string, moduleId: string): string {
-  return `${deviceId}:${moduleId}`;
+/**
+ * Cache key includes `connectorId` so a future multi-connector dashboard
+ * doesn't reuse decoded data across connectors that happen to share a
+ * `deviceId`. Cheap to do now while there's still only one connector.
+ */
+export function cacheKey(connectorId: string, deviceId: string, moduleId: string): string {
+  return `${connectorId}:${deviceId}:${moduleId}`;
 }
 
 export interface FetchPeerModuleResult<I> {
@@ -54,24 +58,21 @@ export interface FetchPeerModuleResult<I> {
 }
 
 export async function fetchPeerModule<I>(args: {
-  server: ServerAddress;
-  creds: AuthCreds;
+  connector: OctiServerConnector;
   crypti: PayloadEncryption;
   peerDeviceId: string;
   moduleId: string;
   decode: (json: unknown) => I;
   cache?: EtagCache<I>;
 }): Promise<FetchPeerModuleResult<I>> {
-  const result = await readModulePayloadWithEtag({
-    server: args.server,
-    creds: args.creds,
+  const result = await args.connector.readModulePayloadWithEtag({
     targetDeviceId: args.peerDeviceId,
     moduleId: args.moduleId,
   });
   if (!result) return { value: null, etag: null, cached: false };
 
   const { bytes, etag } = result;
-  const key = cacheKey(args.peerDeviceId, args.moduleId);
+  const key = cacheKey(args.connector.connectorId, args.peerDeviceId, args.moduleId);
 
   if (etag && args.cache) {
     const cached = args.cache.get(key);

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createOrJoinAccount } from "../protocol/octi-api";
+  import { octiServerConnectorId } from "../protocol/connector-id";
   import { decodeLinkingData } from "../linking/linking-data";
   import { credentialsRepo, type CredentialRecord } from "../storage/credentials-repo";
   import { OCTI_WEB_VERSION } from "../version";
@@ -27,7 +28,10 @@
         deviceTag: { version: OCTI_WEB_VERSION, label: deviceLabel.trim() || "Browser" },
         shareCode: link.shareCode.code,
       });
+      const now = Date.now();
       const record: CredentialRecord = {
+        connectorId: octiServerConnectorId(link.serverAddress, account.account),
+        connectorType: "kserver",
         accountId: account.account,
         devicePassword: account.password,
         ownDeviceId: deviceId,
@@ -36,9 +40,13 @@
         // CRITICAL: inherit the account's shared keyset — generating a fresh one here
         // would let us authenticate but make every other device's data undecryptable.
         encryptionKeyset: link.encryptionKeySet.key,
-        createdAt: Date.now(),
+        createdAt: now,
+        updatedAt: now,
       };
-      await credentialsRepo.save(record);
+      // Atomic replace: preserves single-credential UX during the multi-connector
+      // transition. Drop the replaceAllWith call (use save) when multi-connector
+      // lands.
+      await credentialsRepo.replaceAllWith(record);
       onDone();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);

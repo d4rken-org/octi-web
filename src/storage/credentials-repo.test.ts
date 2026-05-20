@@ -1,34 +1,44 @@
 // @vitest-environment jsdom
 import "fake-indexeddb/auto";
+import { openDB } from "idb";
 import { beforeEach, describe, expect, it } from "vitest";
 import { CredentialsRepo, type CredentialRecord } from "./credentials-repo";
 import { OCTI_WEB_CHANNEL } from "../version";
 
-// Mirror the channel-scoped names from credentials-repo.ts. Tests run with
+// Mirror the channel-scoped DB name from credentials-repo.ts. Tests run with
 // VITE_CHANNEL unset → channel = "stable".
 const DB_NAME = `octi-web-${OCTI_WEB_CHANNEL}`;
-const ACTIVE_ACCOUNT_KEY = `octi-web.${OCTI_WEB_CHANNEL}.active-account-id`;
 
 function makeRecord(overrides: Partial<CredentialRecord> = {}): CredentialRecord {
+  const accountId = overrides.accountId ?? "acct-1";
+  const serverAddress = overrides.serverAddress ?? {
+    domain: "sync.test",
+    protocol: "https" as const,
+    port: 443,
+  };
   return {
-    accountId: "acct-1",
+    connectorId: `kserver-${serverAddress.domain}-${accountId}`,
+    connectorType: "kserver",
+    accountId,
     devicePassword: "pwd-1",
     ownDeviceId: "dev-1",
     deviceLabel: "Firefox on Linux",
-    serverAddress: { domain: "sync.test", protocol: "https", port: 443 },
+    serverAddress,
     encryptionKeyset: new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]),
     createdAt: 1_700_000_000_000,
+    updatedAt: 1_700_000_000_000,
     ...overrides,
   };
 }
 
 describe("CredentialsRepo", () => {
   beforeEach(async () => {
-    // Each test gets a clean slate. wipe() clears the store but doesn't drop
-    // the DB; combined with localStorage.clear() this is enough for isolation.
+    // fake-indexeddb persists across tests within a worker; wipeAll() closes
+    // the module's open connection AND drops the DB so each test sees a clean
+    // slate (and the v1→v2 upgrade test can roll back to v1).
     localStorage.clear();
     const repo = new CredentialsRepo();
-    await repo.wipe();
+    await repo.wipeAll();
   });
 
   it("save → getActive roundtrips all fields including Uint8Array and nested serverAddress", async () => {
@@ -37,12 +47,16 @@ describe("CredentialsRepo", () => {
     await repo.save(record);
     const loaded = await repo.getActive();
     expect(loaded).toBeDefined();
+    expect(loaded!.connectorId).toBe(record.connectorId);
+    expect(loaded!.connectorType).toBe("kserver");
     expect(loaded!.accountId).toBe(record.accountId);
     expect(loaded!.devicePassword).toBe(record.devicePassword);
     expect(loaded!.ownDeviceId).toBe(record.ownDeviceId);
     expect(loaded!.deviceLabel).toBe(record.deviceLabel);
     expect(loaded!.createdAt).toBe(record.createdAt);
     expect(loaded!.serverAddress).toEqual(record.serverAddress);
+    // save() bumps updatedAt to "now"; just assert it moved forward from the fixture.
+    expect(loaded!.updatedAt).toBeGreaterThanOrEqual(record.updatedAt);
     // Compare keyset bytes by content. Structured clone in fake-indexeddb can
     // round-trip Uint8Array as a Buffer (Node) which trips Vitest's toEqual on
     // the parent record even though contents match. Compare values via Array.
@@ -54,31 +68,44 @@ describe("CredentialsRepo", () => {
     expect(await repo.getActive()).toBeUndefined();
   });
 
-  it("getActive clears the stale localStorage pointer when the record was deleted out-of-band", async () => {
+  it("getActive returns the record with the highest updatedAt across multiple records", async () => {
     const repo = new CredentialsRepo();
-    await repo.save(makeRecord({ accountId: "ghost" }));
-    // Out-of-band delete: drop the record but leave the active-pointer.
-    const db = await indexedDB.open(DB_NAME, 1);
-    await new Promise<void>((resolve, reject) => {
-      db.addEventListener("success", () => {
-        const tx = db.result.transaction("credentials", "readwrite");
-        tx.objectStore("credentials").delete("ghost");
-        tx.addEventListener("complete", () => {
-          db.result.close();
-          resolve();
-        });
-        tx.addEventListener("error", () => reject(tx.error));
-      });
-      db.addEventListener("error", () => reject(db.error));
+    const a = makeRecord({ accountId: "a", updatedAt: 1_000 });
+    const b = makeRecord({ accountId: "b", updatedAt: 2_000 });
+    // Save then read raw without going through save()'s timestamp bump, so we
+    // can control updatedAt deterministically. Use a low-level idb client.
+    const db = await openDB(DB_NAME, 2, {
+      upgrade(db) {
+        if (db.objectStoreNames.contains("credentials")) db.deleteObjectStore("credentials");
+        db.createObjectStore("credentials", { keyPath: "connectorId" });
+      },
     });
-    expect(localStorage.getItem(ACTIVE_ACCOUNT_KEY)).toBe("ghost");
-    const result = await repo.getActive();
-    expect(result).toBeUndefined();
-    // Stale pointer scrubbed.
-    expect(localStorage.getItem(ACTIVE_ACCOUNT_KEY)).toBeNull();
+    await db.put("credentials", a);
+    await db.put("credentials", b);
+    db.close();
+    const active = await repo.getActive();
+    expect(active!.connectorId).toBe(b.connectorId);
   });
 
-  it("listAll returns every stored record regardless of which is active", async () => {
+  it("getActive tie-breaks deterministically on connectorId when updatedAt is equal", async () => {
+    const repo = new CredentialsRepo();
+    // Identical updatedAt; lexicographically smaller connectorId wins.
+    const a = makeRecord({ accountId: "aaa", updatedAt: 5_000 });
+    const b = makeRecord({ accountId: "bbb", updatedAt: 5_000 });
+    const db = await openDB(DB_NAME, 2, {
+      upgrade(db) {
+        if (db.objectStoreNames.contains("credentials")) db.deleteObjectStore("credentials");
+        db.createObjectStore("credentials", { keyPath: "connectorId" });
+      },
+    });
+    await db.put("credentials", a);
+    await db.put("credentials", b);
+    db.close();
+    const active = await repo.getActive();
+    expect(active!.connectorId).toBe(a.connectorId); // "kserver-sync.test-aaa" < "...-bbb"
+  });
+
+  it("listAll returns every stored record", async () => {
     const repo = new CredentialsRepo();
     await repo.save(makeRecord({ accountId: "a" }));
     await repo.save(makeRecord({ accountId: "b" }));
@@ -86,23 +113,61 @@ describe("CredentialsRepo", () => {
     expect(all.map((r) => r.accountId).sort()).toEqual(["a", "b"]);
   });
 
-  it("clearActive removes only the current record + pointer", async () => {
+  it("save bumps updatedAt to Date.now()", async () => {
     const repo = new CredentialsRepo();
-    await repo.save(makeRecord({ accountId: "a" }));
-    await repo.save(makeRecord({ accountId: "b" })); // last save wins as active
-    await repo.clearActive();
-    expect(await repo.getActive()).toBeUndefined();
-    const remaining = await repo.listAll();
-    // 'b' was cleared, 'a' remains.
-    expect(remaining.map((r) => r.accountId)).toEqual(["a"]);
+    const before = Date.now();
+    await repo.save(makeRecord({ updatedAt: 0 }));
+    const loaded = await repo.getActive();
+    expect(loaded!.updatedAt).toBeGreaterThanOrEqual(before);
   });
 
-  it("wipe drops everything from the store and the active pointer", async () => {
+  it("replaceAllWith atomically clears existing records and installs the new one", async () => {
+    const repo = new CredentialsRepo();
+    await repo.save(makeRecord({ accountId: "old" }));
+    await repo.save(makeRecord({ accountId: "older" }));
+    expect(await repo.listAll()).toHaveLength(2);
+    await repo.replaceAllWith(makeRecord({ accountId: "new" }));
+    const all = await repo.listAll();
+    expect(all).toHaveLength(1);
+    expect(all[0].accountId).toBe("new");
+  });
+
+  it("wipe drops everything from the store", async () => {
     const repo = new CredentialsRepo();
     await repo.save(makeRecord({ accountId: "a" }));
     await repo.save(makeRecord({ accountId: "b" }));
     await repo.wipe();
     expect(await repo.listAll()).toEqual([]);
-    expect(localStorage.getItem(ACTIVE_ACCOUNT_KEY)).toBeNull();
+  });
+
+  it("v1 → v2 upgrade drops the legacy store and recreates with the new keyPath", async () => {
+    // Seed a v1 DB with the old keyPath: "accountId".
+    const v1 = await openDB(DB_NAME, 1, {
+      upgrade(db) {
+        db.createObjectStore("credentials", { keyPath: "accountId" });
+      },
+    });
+    await v1.put("credentials", {
+      accountId: "legacy",
+      devicePassword: "p",
+      ownDeviceId: "d",
+      deviceLabel: "L",
+      serverAddress: { domain: "sync.test", protocol: "https", port: 443 },
+      encryptionKeyset: new Uint8Array([1]),
+      createdAt: 1,
+    });
+    v1.close();
+
+    // Open via the repo — triggers upgrade(2).
+    const repo = new CredentialsRepo();
+    // listAll should return nothing because the store was dropped and recreated.
+    expect(await repo.listAll()).toEqual([]);
+
+    // Verify the new keyPath is in effect: a v2-shaped record must save by `connectorId`.
+    const fresh = makeRecord({ accountId: "fresh" });
+    await repo.save(fresh);
+    const all = await repo.listAll();
+    expect(all).toHaveLength(1);
+    expect(all[0].connectorId).toBe(fresh.connectorId);
   });
 });

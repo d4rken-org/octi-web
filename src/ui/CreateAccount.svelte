@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createOrJoinAccount } from "../protocol/octi-api";
+  import { octiServerConnectorId } from "../protocol/connector-id";
   import { OFFICIAL_SERVERS, type ServerAddress } from "../protocol/models";
   import { generateAesGcmSivKeyset } from "../crypto/tink-keyset";
   import { credentialsRepo, type CredentialRecord } from "../storage/credentials-repo";
@@ -46,16 +47,24 @@
         deviceId,
         deviceTag: { version: OCTI_WEB_VERSION, label: deviceLabel.trim() },
       });
+      const now = Date.now();
       const record: CredentialRecord = {
+        connectorId: octiServerConnectorId(server, account.account),
+        connectorType: "kserver",
         accountId: account.account,
         devicePassword: account.password,
         ownDeviceId: deviceId,
         deviceLabel: deviceLabel.trim(),
         serverAddress: server,
         encryptionKeyset: keysetBytes,
-        createdAt: Date.now(),
+        createdAt: now,
+        updatedAt: now,
       };
-      await credentialsRepo.save(record);
+      // Atomic replace: preserves single-credential UX during the multi-connector
+      // transition. Drop the replaceAllWith call (use save) when multi-connector
+      // lands. Atomic so a failed write can't leave us with no local credential
+      // after the server has already registered the device.
+      await credentialsRepo.replaceAllWith(record);
       onDone();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);

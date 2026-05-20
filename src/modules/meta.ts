@@ -1,10 +1,5 @@
 import { buildAssociatedData, type PayloadEncryption } from "../crypto/payload";
-import {
-  type AuthCreds,
-  readModulePayload,
-  writeModulePayload,
-} from "../protocol/octi-api";
-import type { ServerAddress } from "../protocol/models";
+import type { OctiServerConnector } from "../protocol/octi-server-connector";
 import type { CredentialRecord } from "../storage/credentials-repo";
 import { detectBrowserInfo } from "../util/browser-detect";
 import { OCTI_WEB_GIT_SHA, OCTI_WEB_VERSION } from "../version";
@@ -79,41 +74,35 @@ export async function buildOwnMetaInfo(record: CredentialRecord): Promise<MetaIn
 }
 
 export async function publishOwnMetaInfo(args: {
-  server: ServerAddress;
-  creds: AuthCreds;
+  connector: OctiServerConnector;
   crypti: PayloadEncryption;
-  record: CredentialRecord;
 }): Promise<void> {
-  const info = await buildOwnMetaInfo(args.record);
+  const record = args.connector.record;
+  const info = await buildOwnMetaInfo(record);
   const plaintext = serializeMetaInfo(info);
-  const ad = buildAssociatedData(args.record.ownDeviceId, META_MODULE_ID);
+  const ad = buildAssociatedData(record.ownDeviceId, META_MODULE_ID);
   const ciphertext = args.crypti.encrypt(plaintext, ad);
   // Pass label + version so the server updates DeviceMetadata.label on this
   // authed write. Without the label header, peers fetching /v1/devices would
   // still see the previous label until they happened to decode the new
   // (encrypted) MetaInfo payload.
-  await writeModulePayload({
-    server: args.server,
-    creds: args.creds,
-    targetDeviceId: args.record.ownDeviceId,
+  await args.connector.writeModulePayload({
+    targetDeviceId: record.ownDeviceId,
     moduleId: META_MODULE_ID,
     ciphertext,
     deviceTag: {
       version: OCTI_WEB_VERSION,
-      label: args.record.deviceLabel,
+      label: record.deviceLabel,
     },
   });
 }
 
 export async function fetchPeerMetaInfo(args: {
-  server: ServerAddress;
-  creds: AuthCreds;
+  connector: OctiServerConnector;
   crypti: PayloadEncryption;
   peerDeviceId: string;
 }): Promise<MetaInfo | null> {
-  const ciphertext = await readModulePayload({
-    server: args.server,
-    creds: args.creds,
+  const ciphertext = await args.connector.readModulePayload({
     targetDeviceId: args.peerDeviceId,
     moduleId: META_MODULE_ID,
   });

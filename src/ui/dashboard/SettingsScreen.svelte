@@ -3,6 +3,7 @@
   import { publishOwnMetaInfo } from "../../modules/meta";
   import { createPayloadEncryption } from "../../crypto/payload";
   import { serverBaseUrl } from "../../protocol/models";
+  import { OctiServerConnector } from "../../protocol/octi-server-connector";
   import { credentialsRepo, type CredentialRecord } from "../../storage/credentials-repo";
   import CopyButton from "./CopyButton.svelte";
   import DetailRow from "./DetailRow.svelte";
@@ -94,16 +95,8 @@
       // and the next sync tick reconciles peers.
       await credentialsRepo.save(updated);
       const crypti = createPayloadEncryption(updated.encryptionKeyset);
-      await publishOwnMetaInfo({
-        server: updated.serverAddress,
-        creds: {
-          accountId: updated.accountId,
-          devicePassword: updated.devicePassword,
-          deviceId: updated.ownDeviceId,
-        },
-        crypti,
-        record: updated,
-      });
+      const connector = new OctiServerConnector(updated);
+      await publishOwnMetaInfo({ connector, crypti });
       saveStatus = "ok";
       onRecordUpdated(updated);
     } catch (e) {

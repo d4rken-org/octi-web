@@ -1,10 +1,5 @@
 import { buildAssociatedData, type PayloadEncryption } from "../crypto/payload";
-import {
-  type AuthCreds,
-  readModulePayload,
-  writeModulePayload,
-} from "../protocol/octi-api";
-import type { ServerAddress } from "../protocol/models";
+import type { OctiServerConnector } from "../protocol/octi-server-connector";
 import { base64ToBytes, bytesToBase64 } from "../util/base64";
 
 /**
@@ -80,33 +75,27 @@ export function deserializeClipboardInfo(bytes: Uint8Array): ClipboardInfo {
 }
 
 export async function publishOwnClipboard(args: {
-  server: ServerAddress;
-  creds: AuthCreds;
+  connector: OctiServerConnector;
   crypti: PayloadEncryption;
-  ownDeviceId: string;
   info: ClipboardInfo;
 }): Promise<void> {
+  const ownDeviceId = args.connector.ownDeviceId;
   const plaintext = serializeClipboardInfo(args.info);
-  const ad = buildAssociatedData(args.ownDeviceId, CLIPBOARD_MODULE_ID);
+  const ad = buildAssociatedData(ownDeviceId, CLIPBOARD_MODULE_ID);
   const ciphertext = args.crypti.encrypt(plaintext, ad);
-  await writeModulePayload({
-    server: args.server,
-    creds: args.creds,
-    targetDeviceId: args.ownDeviceId,
+  await args.connector.writeModulePayload({
+    targetDeviceId: ownDeviceId,
     moduleId: CLIPBOARD_MODULE_ID,
     ciphertext,
   });
 }
 
 export async function fetchPeerClipboard(args: {
-  server: ServerAddress;
-  creds: AuthCreds;
+  connector: OctiServerConnector;
   crypti: PayloadEncryption;
   peerDeviceId: string;
 }): Promise<ClipboardInfo | null> {
-  const ciphertext = await readModulePayload({
-    server: args.server,
-    creds: args.creds,
+  const ciphertext = await args.connector.readModulePayload({
     targetDeviceId: args.peerDeviceId,
     moduleId: CLIPBOARD_MODULE_ID,
   });
