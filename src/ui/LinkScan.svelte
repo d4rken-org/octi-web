@@ -71,10 +71,9 @@
       createdAt: now,
       updatedAt: now,
     };
-    // Atomic replace: preserves single-credential UX during the multi-connector
-    // transition. Drop the replaceAllWith call (use save) when multi-connector
-    // lands.
-    await credentialsRepo.replaceAllWith(record);
+    // Append the new credential; multi-connector lets it coexist with any
+    // existing ones. App.svelte's `onDone` rebootstraps the manager.
+    await credentialsRepo.save(record);
     onDone();
   }
 

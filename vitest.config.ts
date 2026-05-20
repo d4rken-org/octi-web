@@ -1,6 +1,12 @@
+import { svelte } from "@sveltejs/vite-plugin-svelte";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
+  // The svelte plugin compiles `.svelte` and `.svelte.ts` files so vitest can
+  // load runes-based modules (notably `ConnectorManager` in
+  // `src/sync/connector-manager.svelte.ts`). Without this, `$state` /
+  // `$derived` blow up at module load with `$state is not defined`.
+  plugins: [svelte({ hot: false })],
   test: {
     environment: "node",
     include: ["src/**/*.test.ts"],

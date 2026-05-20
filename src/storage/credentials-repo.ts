@@ -131,6 +131,16 @@ export class CredentialsRepo {
     return db.getAll(STORE);
   }
 
+  /**
+   * Remove a single credential by its connector id. Used by
+   * {@code ConnectorManager.removeConnector} so the user can disconnect one
+   * sync source without wiping the others.
+   */
+  async deleteByConnectorId(connectorId: string): Promise<void> {
+    const db = await getDb();
+    await db.delete(STORE, connectorId);
+  }
+
   /** Clears the store. Used by Settings "sign out from this device". */
   async wipe(): Promise<void> {
     const db = await getDb();

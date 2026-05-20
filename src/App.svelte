@@ -4,27 +4,33 @@
   import CanaryBanner from "./ui/CanaryBanner.svelte";
   import Onboarding from "./ui/Onboarding.svelte";
   import DashboardStub from "./ui/DashboardStub.svelte";
-  import { credentialsRepo, type CredentialRecord } from "./storage/credentials-repo";
-  import { getOwnDeviceId } from "./storage/identity-settings";
+  import { credentialsRepo } from "./storage/credentials-repo";
+  import { ConnectorManager } from "./sync/connector-manager.svelte";
+
+  /**
+   * The dashboard runs against a singleton {@link ConnectorManager} for the
+   * life of the SPA. We construct it once at bootstrap, populate from
+   * persistent storage, and pass it down to {@link DashboardStub}.
+   *
+   * Going through the manager (not the credential record directly) is what
+   * lets multiple linked accounts coexist: the dashboard sees a merged peer
+   * view, the link/create flows just append a new credential and call
+   * {@code manager.addConnector(record)}.
+   */
+  const manager = new ConnectorManager();
 
   let bootstrapping = $state(true);
-  let record = $state<CredentialRecord | null>(null);
-  /**
-   * Per-install own-device UUID resolved once at bootstrap so it can be passed
-   * synchronously into every {@code OctiServerConnector} we construct
-   * downstream. {@link getOwnDeviceId} seeds from an existing credential the
-   * first time it's called, so users who linked before this PR don't
-   * regenerate.
-   */
-  let ownDeviceId = $state<string | null>(null);
+  /** True when at least one credential is linked; drives Onboarding vs Dashboard. */
+  let hasAnyConnector = $state(false);
 
   async function reload() {
-    record = (await credentialsRepo.getActive()) ?? null;
+    await manager.bootstrap();
+    const records = await credentialsRepo.listAll();
+    hasAnyConnector = records.length > 0;
   }
 
   onMount(async () => {
     try {
-      ownDeviceId = await getOwnDeviceId();
       await reload();
     } finally {
       bootstrapping = false;
@@ -35,10 +41,10 @@
 <CanaryBanner />
 
 <main>
-  {#if bootstrapping || ownDeviceId == null}
+  {#if bootstrapping}
     <p style="opacity: 0.6;">Loading…</p>
-  {:else if record}
-    <DashboardStub {record} {ownDeviceId} onSignOut={reload} />
+  {:else if hasAnyConnector}
+    <DashboardStub {manager} onSignOut={reload} />
   {:else}
     <Onboarding onDone={reload} />
   {/if}
