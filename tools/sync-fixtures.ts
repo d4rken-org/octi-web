@@ -1,17 +1,23 @@
 /**
- * Fetch app-main's committed cross-repo wire-format fixtures into a local cache.
+ * Fetch cross-repo wire-format fixtures into a local cache.
  *
  * Driven by `fixture-lock.json` at the repo root, which pins a full 40-char
- * commit SHA on `d4rken-org/octi` plus the SHA-256 of that commit's
+ * commit SHA on the upstream source plus the SHA-256 of that commit's
  * `manifest.json`. The manifest then enumerates each fixture file and its own
  * sha256; this script verifies every byte against those hashes before writing
  * to `.cache/interop-fixtures/<sha>/`.
  *
- * Invoked both as a vitest globalSetup (so `pnpm test` always has fresh
- * fixtures) and as a CLI script via `pnpm fixtures:sync`.
+ * **Override path.** Set `INTEROP_FIXTURE_OVERRIDES='{"<owner/repo>":"<sha40>"}'`
+ * to force the fetch against an arbitrary commit. Used by the upstream-gating
+ * CI workflow so an app-main PR can test what its changes look like to web
+ * before merge. The lockfile's `manifest_sha256` doesn't apply to arbitrary
+ * SHAs, so we drop that check and rely on the manifest's per-file sha256s
+ * (which we fetch fresh every run under override).
  *
- * Idempotent: if the cache directory already has the right marker + verified
- * files for the locked SHA, network access is skipped.
+ * Invoked both as a vitest globalSetup and as a CLI script (`pnpm fixtures:sync`).
+ *
+ * Idempotent in the non-override path: a populated, verifying cache skips
+ * network access entirely.
  */
 import {
   existsSync,
@@ -23,11 +29,13 @@ import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-interface FixtureLock {
-  source: string;
-  ref: string;
-  manifest_sha256: string;
-}
+import {
+  type FixtureLock,
+  type ResolvedSource,
+  resolveFromEnv,
+  SOURCE_PATHS,
+  validateLock,
+} from "../src/__interop__/sync-ref-resolver";
 
 interface ManifestEntry {
   sha256: string;
@@ -40,9 +48,7 @@ interface Manifest {
   files: Record<string, ManifestEntry>;
 }
 
-const SHA40_RE = /^[a-f0-9]{40}$/;
 const SHA256_RE = /^[a-f0-9]{64}$/;
-const REPO_OWNER_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 // Filenames: ASCII subset, must end in `.json`, no leading dot, no dot segments,
 // no `..`. Subdirs allowed for forward-compat with future module-fixture layouts.
 const FIXTURE_FILE_RE = /^(?:[A-Za-z0-9_-][A-Za-z0-9_.-]*\/)*[A-Za-z0-9_-][A-Za-z0-9_.-]*\.json$/;
@@ -63,33 +69,28 @@ function sha256Hex(bytes: Uint8Array): string {
 function readLock(): FixtureLock {
   const raw = readFileSync(LOCK_PATH, "utf-8");
   const lock = JSON.parse(raw) as FixtureLock;
-  if (!REPO_OWNER_RE.test(lock.source)) {
-    throw new Error(`fixture-lock.json source must be "<owner>/<repo>", got: ${lock.source}`);
-  }
-  if (!SHA40_RE.test(lock.ref)) {
-    throw new Error(
-      `fixture-lock.json ref must be a 40-character commit SHA (no tags / branches accepted), got: ${lock.ref}`,
-    );
-  }
-  if (!SHA256_RE.test(lock.manifest_sha256)) {
-    throw new Error(`fixture-lock.json manifest_sha256 must be 64 lowercase hex chars`);
-  }
+  validateLock(lock);
   return lock;
 }
 
-function rawBaseUrl(lock: FixtureLock): string {
-  return `https://raw.githubusercontent.com/${lock.source}/${lock.ref}/sync-core/src/test/resources/interop`;
+function rawBaseUrl(resolved: ResolvedSource): string {
+  const path = SOURCE_PATHS[resolved.source];
+  if (path === undefined) {
+    throw new Error(`source "${resolved.source}" not in SOURCE_PATHS`);
+  }
+  return `https://raw.githubusercontent.com/${resolved.source}/${resolved.ref}/${path}`;
 }
 
 /**
- * Single point of truth for validating fixture bytes against the lockfile.
+ * Single point of truth for validating fixture bytes against the lockfile (or,
+ * under override, against the manifest's self-claimed shape only).
  * Used by BOTH the cold-fetch path and the warm-cache check, so a stale cache
  * can't pass weaker checks than a fresh download.
  */
-function parseAndValidateManifest(bytes: Uint8Array, lock: FixtureLock): Manifest {
-  if (sha256Hex(bytes) !== lock.manifest_sha256) {
+function parseAndValidateManifest(bytes: Uint8Array, resolved: ResolvedSource): Manifest {
+  if (resolved.manifestSha256 !== null && sha256Hex(bytes) !== resolved.manifestSha256) {
     throw new Error(
-      `manifest sha256 mismatch — expected ${lock.manifest_sha256}, got ${sha256Hex(bytes)}. ` +
+      `manifest sha256 mismatch — expected ${resolved.manifestSha256}, got ${sha256Hex(bytes)}. ` +
         `Either the lockfile is stale or the upstream history was rewritten.`,
     );
   }
@@ -106,9 +107,9 @@ function parseAndValidateManifest(bytes: Uint8Array, lock: FixtureLock): Manifes
   if (m.schemaVersion !== 1) {
     throw new Error(`unsupported manifest schemaVersion ${String(m.schemaVersion)}; this client knows v1`);
   }
-  if (m.source !== lock.source) {
+  if (m.source !== resolved.source) {
     throw new Error(
-      `manifest source ${String(m.source)} disagrees with lockfile source ${lock.source}`,
+      `manifest source ${String(m.source)} disagrees with resolved source ${resolved.source}`,
     );
   }
   if (!m.files || typeof m.files !== "object" || Array.isArray(m.files)) {
@@ -152,13 +153,17 @@ async function fetchBytes(url: string): Promise<Uint8Array> {
   );
 }
 
-function cacheIsValid(cacheDir: string, lock: FixtureLock): boolean {
+function cacheIsValid(cacheDir: string, resolved: ResolvedSource): boolean {
   // Only trust the cache if every file the manifest references is present AND
   // hashes correctly AND the manifest itself passes the same schema validation
   // a cold fetch would. Partial / poisoned caches must re-download.
+  //
+  // Under override the cache can't be trusted as the manifest source — we
+  // need to refetch the manifest to know what to verify against. Callers must
+  // gate this function on `resolved.manifestSha256 !== null`.
   const markerPath = resolve(cacheDir, ".sha");
   if (!existsSync(markerPath)) return false;
-  if (readFileSync(markerPath, "utf-8").trim() !== lock.ref) return false;
+  if (readFileSync(markerPath, "utf-8").trim() !== resolved.ref) return false;
 
   const manifestPath = resolve(cacheDir, "manifest.json");
   if (!existsSync(manifestPath)) return false;
@@ -166,7 +171,7 @@ function cacheIsValid(cacheDir: string, lock: FixtureLock): boolean {
 
   let manifest: Manifest;
   try {
-    manifest = parseAndValidateManifest(manifestBytes, lock);
+    manifest = parseAndValidateManifest(manifestBytes, resolved);
   } catch {
     return false;
   }
@@ -181,35 +186,51 @@ function cacheIsValid(cacheDir: string, lock: FixtureLock): boolean {
 
 export async function syncFixtures(): Promise<void> {
   const lock = readLock();
-  const cacheDir = resolve(CACHE_BASE, lock.ref);
+  const resolved = resolveFromEnv(lock);
+  if (resolved.manifestSha256 === null) {
+    console.log(`using override for ${resolved.source}: ${resolved.ref}`);
+  }
+  const cacheDir = resolve(CACHE_BASE, resolved.ref);
 
-  if (cacheIsValid(cacheDir, lock)) {
-    console.log(`interop fixtures cache hit: ${lock.source}@${lock.ref}`);
+  // Under override (no committed manifest sha to pin against), always re-fetch
+  // the manifest. The cache may still have valid bytes, but the manifest must
+  // come from the live upstream so it can't be a poisoned local copy.
+  if (resolved.manifestSha256 !== null && cacheIsValid(cacheDir, resolved)) {
+    console.log(`interop fixtures cache hit: ${resolved.source}@${resolved.ref}`);
     return;
   }
 
-  console.log(`fetching interop fixtures from ${lock.source}@${lock.ref}...`);
+  console.log(`fetching interop fixtures from ${resolved.source}@${resolved.ref}...`);
   mkdirSync(cacheDir, { recursive: true });
 
-  const manifestBytes = await fetchBytes(`${rawBaseUrl(lock)}/manifest.json`);
-  const manifest = parseAndValidateManifest(manifestBytes, lock);
+  const manifestBytes = await fetchBytes(`${rawBaseUrl(resolved)}/manifest.json`);
+  const manifest = parseAndValidateManifest(manifestBytes, resolved);
 
   writeFileSync(resolve(cacheDir, "manifest.json"), manifestBytes);
 
   for (const [name, entry] of Object.entries(manifest.files)) {
-    const bytes = await fetchBytes(`${rawBaseUrl(lock)}/${name}`);
+    // Under override, cached files for this ref may already be valid; skip
+    // re-download in that case to spare bandwidth for unchanged blobs.
+    const dest = resolve(cacheDir, name);
+    if (existsSync(dest)) {
+      const cachedSha = sha256Hex(new Uint8Array(readFileSync(dest)));
+      if (cachedSha === entry.sha256) {
+        console.log(`  ${name} (cached, sha256 ok)`);
+        continue;
+      }
+    }
+    const bytes = await fetchBytes(`${rawBaseUrl(resolved)}/${name}`);
     const actual = sha256Hex(bytes);
     if (actual !== entry.sha256) {
       throw new Error(`${name} sha256 mismatch — expected ${entry.sha256}, got ${actual}`);
     }
-    const dest = resolve(cacheDir, name);
     mkdirSync(dirname(dest), { recursive: true });
     writeFileSync(dest, bytes);
     console.log(`  ${name} (${bytes.length} bytes, sha256 ok)`);
   }
 
   // Marker written last so an interrupted run never produces a "valid" cache.
-  writeFileSync(resolve(cacheDir, ".sha"), lock.ref);
+  writeFileSync(resolve(cacheDir, ".sha"), resolved.ref);
   console.log(`interop fixtures synced: ${cacheDir}`);
 }
 

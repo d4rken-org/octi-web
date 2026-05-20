@@ -1,15 +1,28 @@
 /**
  * Read-side of the cross-repo interop fixture cache. App-main owns the canonical
  * JSON under `sync-core/src/test/resources/interop/`; `tools/sync-fixtures.ts`
- * fetches it at the SHA pinned in `fixture-lock.json` and verifies sha256s.
- * This module hands tests the parsed bytes + reconstructed plaintexts.
+ * fetches it at the resolved SHA (lockfile, possibly overridden by
+ * `INTEROP_FIXTURE_OVERRIDES`) and verifies sha256s. This module hands tests
+ * the parsed bytes + reconstructed plaintexts.
  *
  * `vitest.config.ts` wires `tools/sync-fixtures.ts` as `globalSetup`, so by the
  * time any test imports from here the cache directory is guaranteed present.
+ *
+ * **Critical**: both this loader AND the sync go through `resolveFromEnv` so
+ * they always agree on the effective cache directory. If only one side applied
+ * overrides, the upstream-gating CI workflow would either fail (cache miss) or
+ * silently test stale lockfile-pinned fixtures.
  */
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import {
+  type FixtureLock,
+  type ResolvedSource,
+  resolveFromEnv,
+  validateLock,
+} from "./sync-ref-resolver";
 
 // Repo root is derived from this file's location, NOT process.cwd().
 // process.cwd() would mismatch tools/sync-fixtures.ts (which derives root from
@@ -18,16 +31,20 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
 const LOCK_PATH = resolve(REPO_ROOT, "fixture-lock.json");
 
-interface FixtureLock {
-  source: string;
-  ref: string;
-  manifest_sha256: string;
-}
-
 const lock = JSON.parse(readFileSync(LOCK_PATH, "utf-8")) as FixtureLock;
+validateLock(lock);
 
-export const INTEROP_CACHE_DIR = resolve(REPO_ROOT, ".cache", "interop-fixtures", lock.ref);
+const resolved = resolveFromEnv(lock);
+
+export const INTEROP_CACHE_DIR = resolve(REPO_ROOT, ".cache", "interop-fixtures", resolved.ref);
 export const INTEROP_LOCK: Readonly<FixtureLock> = Object.freeze(lock);
+/**
+ * The effective source for this run — lockfile ref, or the override from
+ * `INTEROP_FIXTURE_OVERRIDES` if one was active. Read `INTEROP_RESOLVED_SOURCE.ref`
+ * rather than `INTEROP_LOCK.ref` if you want the SHA that the cache actually
+ * points at. `manifestSha256` is null under override.
+ */
+export const INTEROP_RESOLVED_SOURCE: Readonly<ResolvedSource> = Object.freeze(resolved);
 
 /** Load a fixture file from the verified cache as raw bytes. */
 export function loadInteropBytes(name: string): Uint8Array {
