@@ -37,7 +37,7 @@
     isSelf,
     layout,
     data,
-    ownConnectorId,
+    ownConnectorIds,
     onLayoutChange,
     onClipboardPasteOs,
     onClipboardPublishText,
@@ -53,7 +53,9 @@
     isSelf: boolean;
     layout: TileLayout;
     data: TileData;
-    ownConnectorId: string;
+    /** Every active connector's id. FilesTile / FilesSheet check `f.availableOn`
+     *  intersects this set to decide if a file is downloadable. */
+    ownConnectorIds: readonly string[];
     onLayoutChange: (next: TileLayout) => void;
     /** Own-device only — quick-action handler from the tile. */
     onClipboardPasteOs?: () => Promise<void>;
@@ -163,7 +165,7 @@
         {layout}
         {data}
         {isSelf}
-        {ownConnectorId}
+        {ownConnectorIds}
         onOpenSheet={(id) => (openSheet = id)}
         onClipboardPasteOs={onClipboardPasteOs && (() => {
           void onClipboardPasteOs!();
@@ -218,7 +220,7 @@
     error={data.fileShareError}
     deviceLabel={metaInfoLabel(data.meta, deviceLabel)}
     {isSelf}
-    {ownConnectorId}
+    {ownConnectorIds}
     onClose={closeSheet}
     onUploadFile={isSelf ? onFilesUploadCallback : undefined}
     onDownloadFile={onDownloadFile}

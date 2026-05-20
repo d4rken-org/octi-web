@@ -57,7 +57,7 @@
     layout,
     data,
     isSelf,
-    ownConnectorId,
+    ownConnectorIds,
     onOpenSheet,
     onClipboardPasteOs,
     onFilesPickUpload,
@@ -65,7 +65,7 @@
     layout: TileLayout;
     data: TileData;
     isSelf: boolean;
-    ownConnectorId: string;
+    ownConnectorIds: readonly string[];
     onOpenSheet: (moduleId: string) => void;
     onClipboardPasteOs?: () => void;
     onFilesPickUpload?: () => void;
@@ -120,7 +120,7 @@
         error={data.fileShareError}
         {isSelf}
         {wide}
-        {ownConnectorId}
+        {ownConnectorIds}
         onOpen={() => onOpenSheet(moduleId)}
         onPickUpload={isSelf ? onFilesPickUpload : undefined}
       />

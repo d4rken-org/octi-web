@@ -140,34 +140,30 @@ export interface UploadResult {
 }
 
 /**
- * Upload `file` and publish a SharedFile entry on our own FileShareInfo. Steps:
+ * Read `file` to bytes, hash, and encrypt + upload its blob to ONE connector.
+ * The blobKey is the SHA-256 of the plaintext (`sha256:<hex>`) and is shared
+ * across connectors — peer downloaders use it as the AAD for the streaming
+ * AEAD verify so the bytes can be authenticated regardless of which connector
+ * served them.
  *
- *   1. Read file bytes
- *   2. SHA-256 of plaintext (used for blobKey + checksum + integrity verify on download)
- *   3. Encrypt with the streaming blob cipher (AAD includes blobKey)
- *   4. Upload encrypted bytes via blob-session API → server blobId
- *   5. Read our own current FileShareInfo
- *   6. Append a fresh SharedFile entry; encrypt + commit module payload
- *
- * Default expiry: 30 days (matches the Android convention).
+ * Returns the connector-issued blob id. The manager calls this in parallel
+ * for every active connector, then assembles a single multi-ref SharedFile
+ * via {@link buildSharedFile} and publishes it via
+ * {@link publishSharedFileEntry} once per connector.
  */
-export async function uploadFile(args: {
+export async function uploadFileBlobToConnector(args: {
   connector: OctiServerConnector;
-  crypti: PayloadEncryption;
   blobCipher: BlobCipher;
-  file: File;
+  plaintextBytes: Uint8Array;
+  blobKey: string;
   onProgress?: (bytes: number, total: number) => void;
-}): Promise<UploadResult> {
+}): Promise<{ blobId: string }> {
   const ownDeviceId = args.connector.ownDeviceId;
-  const connectorIdStr = args.connector.connectorId;
-  const plaintextBytes = new Uint8Array(await args.file.arrayBuffer());
-  const plaintextChecksum = await sha256Hex(plaintextBytes);
-  const blobKey = `sha256:${plaintextChecksum}`;
   const ciphertext = await args.blobCipher.encrypt(
-    plaintextBytes,
+    args.plaintextBytes,
     ownDeviceId,
     FILES_MODULE_ID,
-    blobKey,
+    args.blobKey,
   );
   const blobId = await args.connector.uploadBlobBytes({
     targetDeviceId: ownDeviceId,
@@ -175,40 +171,71 @@ export async function uploadFile(args: {
     ciphertext,
     onProgress: args.onProgress,
   });
+  return { blobId };
+}
 
+/**
+ * Build a {@link SharedFile} entry whose `availableOn` and `connectorRefs`
+ * span every connector the blob was successfully uploaded to. Pure /
+ * side-effect-free — the actual per-connector publish happens via
+ * {@link publishSharedFileEntry}.
+ */
+export function buildSharedFile(args: {
+  file: File;
+  plaintextSize: number;
+  blobKey: string;
+  plaintextChecksum: string;
+  uploads: ReadonlyArray<{ connectorId: string; blobId: string }>;
+}): SharedFile {
   const now = new Date();
   const expires = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
-  const shared: SharedFile = {
+  const connectorRefs: Record<string, string> = {};
+  for (const u of args.uploads) connectorRefs[u.connectorId] = u.blobId;
+  return {
     name: args.file.name || "unnamed",
     mimeType: args.file.type || "application/octet-stream",
-    size: plaintextBytes.length,
-    blobKey,
-    checksum: plaintextChecksum,
+    size: args.plaintextSize,
+    blobKey: args.blobKey,
+    checksum: args.plaintextChecksum,
     sharedAt: now.toISOString(),
     expiresAt: expires.toISOString(),
-    availableOn: [connectorIdStr],
-    connectorRefs: { [connectorIdStr]: blobId },
+    availableOn: args.uploads.map((u) => u.connectorId),
+    connectorRefs,
   };
+}
 
-  // Read current FileShareInfo + ETag, merge, commit. The PUT path is required
-  // here (not the legacy POST): for blob-backed modules the server only keeps
-  // blobs alive that are referenced by the latest module commit, so a POST
-  // would orphan our just-uploaded blob and the next GC tick would 404 it.
+/**
+ * Read THIS connector's current own-device FileShareInfo, splice in `shared`
+ * (de-duping by `blobKey`), and commit the merged document back.
+ *
+ * The `blobIds` precondition on the commit is the union of blob ids ON THIS
+ * connector — the server replaces (doesn't merge) its blob link set on each
+ * commit, so any blob we don't list gets GC'd.
+ *
+ * The PUT commit path (not legacy POST) is mandatory for blob-backed modules:
+ * POST doesn't link blobs, so referenced blobs age out after the complete-
+ * state TTL and downloads return 404.
+ */
+export async function publishSharedFileEntry(args: {
+  connector: OctiServerConnector;
+  crypti: PayloadEncryption;
+  shared: SharedFile;
+}): Promise<void> {
+  const ownDeviceId = args.connector.ownDeviceId;
+  const connectorIdStr = args.connector.connectorId;
   const { info: current, etag } = await fetchPeerFileShareInfoWithEtag({
     connector: args.connector,
     crypti: args.crypti,
     peerDeviceId: ownDeviceId,
   });
   // De-dupe by blobKey: re-uploading the same content replaces the entry.
-  const filtered = current.files.filter((f) => f.blobKey !== blobKey);
+  const filtered = current.files.filter((f) => f.blobKey !== args.shared.blobKey);
   const next: FileShareInfo = {
-    files: [...filtered, shared],
+    files: [...filtered, args.shared],
     deleteRequests: current.deleteRequests,
   };
   const modulePayloadAad = buildAssociatedData(ownDeviceId, FILES_MODULE_ID);
   const documentBytes = args.crypti.encrypt(serializeFileShareInfo(next), modulePayloadAad);
-  // blobRefs must include every blob the new document references — server
-  // *replaces* (doesn't merge) the link set on each commit.
   const allBlobIds = collectBlobIdsOnServer(next, connectorIdStr);
   await args.connector.commitModule({
     targetDeviceId: ownDeviceId,
@@ -217,6 +244,41 @@ export async function uploadFile(args: {
     blobIds: allBlobIds,
     ...(etag ? { ifMatch: etag } : { ifNoneMatchStar: true }),
   });
+}
+
+/**
+ * Single-connector convenience wrapper (the pre-multi-connector entry point)
+ * — preserves the existing `uploadFile({connector, crypti, blobCipher, file})`
+ * call shape so tests + any straggling callers keep working. The dashboard +
+ * `ConnectorManager.uploadFile` use the two-phase
+ * {@link uploadFileBlobToConnector} + {@link publishSharedFileEntry} pair
+ * directly for fan-out.
+ */
+export async function uploadFile(args: {
+  connector: OctiServerConnector;
+  crypti: PayloadEncryption;
+  blobCipher: BlobCipher;
+  file: File;
+  onProgress?: (bytes: number, total: number) => void;
+}): Promise<UploadResult> {
+  const plaintextBytes = new Uint8Array(await args.file.arrayBuffer());
+  const plaintextChecksum = await sha256Hex(plaintextBytes);
+  const blobKey = `sha256:${plaintextChecksum}`;
+  const { blobId } = await uploadFileBlobToConnector({
+    connector: args.connector,
+    blobCipher: args.blobCipher,
+    plaintextBytes,
+    blobKey,
+    onProgress: args.onProgress,
+  });
+  const shared = buildSharedFile({
+    file: args.file,
+    plaintextSize: plaintextBytes.length,
+    blobKey,
+    plaintextChecksum,
+    uploads: [{ connectorId: args.connector.connectorId, blobId }],
+  });
+  await publishSharedFileEntry({ connector: args.connector, crypti: args.crypti, shared });
   return { shared };
 }
 

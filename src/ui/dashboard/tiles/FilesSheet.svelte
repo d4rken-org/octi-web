@@ -8,7 +8,7 @@
     error,
     deviceLabel,
     isSelf,
-    ownConnectorId,
+    ownConnectorIds,
     onClose,
     onUploadFile,
     onDownloadFile,
@@ -17,7 +17,9 @@
     error: string | null;
     deviceLabel: string;
     isSelf: boolean;
-    ownConnectorId: string;
+    /** Every active connector's id. A file is downloadable if any of these
+     *  ids appears in `f.availableOn`. */
+    ownConnectorIds: readonly string[];
     onClose: () => void;
     onUploadFile?: (file: File, onProgress?: (done: number, total: number) => void) => Promise<void>;
     onDownloadFile: (file: SharedFile) => Promise<void>;
@@ -47,7 +49,7 @@
 
   function isDownloadable(f: SharedFile): boolean {
     if (isExpired(f)) return false;
-    return f.availableOn.includes(ownConnectorId);
+    return f.availableOn.some((id) => ownConnectorIds.includes(id));
   }
 
   const sortedFiles = $derived(

@@ -10,7 +10,7 @@
     wide = false,
     onOpen,
     onPickUpload,
-    ownConnectorId,
+    ownConnectorIds,
   }: {
     info: FileShareInfo | null;
     error: string | null;
@@ -19,14 +19,16 @@
     onOpen: () => void;
     /** Own-device only — opens the OS file picker and uploads on confirm. */
     onPickUpload?: () => void;
-    /** Server-side connector ID for the current account; used to filter downloadable files. */
-    ownConnectorId: string;
+    /** Every active connector's id. A file is downloadable if any of these
+     *  ids is in `f.availableOn` — multi-connector users may have access
+     *  to files hosted on a non-primary connector. */
+    ownConnectorIds: readonly string[];
   } = $props();
 
   const state = $derived<"ok" | "empty" | "error">(error ? "error" : info ? "ok" : "empty");
 
   function isDownloadable(f: SharedFile, now: number): boolean {
-    if (!f.availableOn.includes(ownConnectorId)) return false;
+    if (!f.availableOn.some((id) => ownConnectorIds.includes(id))) return false;
     const expiresAt = Date.parse(f.expiresAt);
     if (Number.isFinite(expiresAt) && expiresAt < now) return false;
     return true;
