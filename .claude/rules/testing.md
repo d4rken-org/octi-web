@@ -44,9 +44,16 @@ test that pins the format:
 - `protocol/octi-api.test.ts`, `protocol/blob-session.test.ts` — REST shapes.
 - `protocol/capabilities.test.ts` — `OCTI_WEB_CAPABILITIES` invariants (regex,
   sort, header size). Must stay green or the sync-server validator rejects us.
-- `crypto/payload.test.ts` — wire bytes vs Tink/Android fixtures in
-  `crypto/__fixtures__/`. Regenerate fixtures via the Android-side
-  `TinkVectorsExportTest`; never tweak by hand.
+- `crypto/payload.test.ts`, `crypto/streaming-aead.test.ts`, `crypto/tink-keyset.test.ts`
+  — wire bytes vs Tink/Android fixtures fetched from
+  [`d4rken-org/octi`](https://github.com/d4rken-org/octi) at the commit SHA pinned
+  in `fixture-lock.json`. The cache lives at `.cache/interop-fixtures/<sha>/`
+  (gitignored). `tools/sync-fixtures.ts` is wired as vitest `globalSetup`, so
+  any `pnpm test` invocation refreshes the cache before tests run; explicit
+  `pnpm fixtures:sync` does the same thing manually. Loader + materialization
+  helpers live at [`src/__interop__/fixture-loader.ts`](../../src/__interop__/fixture-loader.ts).
+  Regenerate fixtures upstream in app-main and bump the lockfile here — never
+  edit cached files.
 - `modules/<name>.test.ts` — backward-compat JSON for each module.
 - `linking/linking-data.test.ts` — gzip + base64 link payload.
 
