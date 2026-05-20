@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { createShareCode } from "../protocol/octi-api";
+  import type { OctiServerConnector } from "../protocol/octi-server-connector";
   import { encodeLinkingData } from "../linking/linking-data";
   import { renderQrPng } from "../linking/qr";
-  import { credentialsRepo, type CredentialRecord } from "../storage/credentials-repo";
 
-  let record = $state<CredentialRecord | null>(null);
+  let { connector }: { connector: OctiServerConnector } = $props();
+
   let linkText = $state<string | null>(null);
   let qrDataUrl = $state<string | null>(null);
   let minting = $state(false);
@@ -16,17 +16,8 @@
     copied = false;
     minting = true;
     try {
-      record = (await credentialsRepo.getActive()) ?? null;
-      if (!record) throw new Error("No active account — sign in first.");
-      const r = record;
-      const shareCode = await createShareCode({
-        server: r.serverAddress,
-        creds: {
-          accountId: r.accountId,
-          devicePassword: r.devicePassword,
-          deviceId: r.ownDeviceId,
-        },
-      });
+      const r = connector.record;
+      const shareCode = await connector.createShareCode();
       const encoded = encodeLinkingData({
         serverAddress: r.serverAddress,
         shareCode: { code: shareCode.code },

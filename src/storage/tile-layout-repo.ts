@@ -1,25 +1,30 @@
-import { openDB, type DBSchema, type IDBPDatabase } from "idb";
+import { deleteDB, openDB, type DBSchema, type IDBPDatabase } from "idb";
 import {
   defaultLayoutForPlatform,
   mergeLayoutWithRegistry,
   type TileLayout,
 } from "../modules/module-registry";
+import { OCTI_WEB_CHANNEL } from "../version";
 
 /**
  * Per-device tile layout persistence.
  *
- * Opens a SEPARATE IndexedDB database (`octi-web-tile-layouts`) so its schema
- * version can move independently from `credentials-repo`'s `octi-web` DB. If
- * we shared the DB, a `tile-layout` migration would conflict with an existing
- * open v1 connection from the credentials repo and trigger blocked-upgrade
- * errors at startup. Two-DB isolation costs us nothing — IndexedDB handles
- * dozens of databases per origin without issue.
+ * Opens a SEPARATE IndexedDB database from `credentials-repo` so its schema
+ * version can move independently — sharing the DB would let a tile-layout
+ * migration block on an open v1 credentials connection at startup.
  *
- * Records are keyed by (accountId, deviceId). Sign-out should wipe both
- * databases together (see {@link wipeAll}).
+ * Records are keyed by `deviceId` alone, mirroring the Android client's
+ * `Map<DeviceId, TileLayoutConfig>` in `DashboardConfig.kt`. This relies on
+ * the cross-platform invariant that a physical device has a single stable
+ * `deviceId` UUID regardless of which connector reaches it — Android
+ * deduplicates the dashboard grid on that same key. Sign-out should wipe
+ * both databases together (see {@link TileLayoutRepo.wipeAll}).
+ *
+ * Channel-scoped DB name: canary and stable share the origin, and bumping
+ * the version without isolation would let one channel's upgrade trip the
+ * other channel's open connection.
  */
 export interface TileLayoutRecord {
-  accountId: string;
   deviceId: string;
   order: string[];
   wide: string[];
@@ -29,13 +34,13 @@ export interface TileLayoutRecord {
 
 interface TileLayoutDB extends DBSchema {
   layouts: {
-    key: [string, string]; // [accountId, deviceId]
+    key: string; // deviceId
     value: TileLayoutRecord;
   };
 }
 
-const DB_NAME = "octi-web-tile-layouts";
-const DB_VERSION = 1;
+const DB_NAME = `octi-web-tile-layouts-${OCTI_WEB_CHANNEL}`;
+const DB_VERSION = 2;
 const STORE = "layouts";
 
 let dbPromise: Promise<IDBPDatabase<TileLayoutDB>> | null = null;
@@ -43,10 +48,15 @@ let dbPromise: Promise<IDBPDatabase<TileLayoutDB>> | null = null;
 function getDb(): Promise<IDBPDatabase<TileLayoutDB>> {
   if (!dbPromise) {
     dbPromise = openDB<TileLayoutDB>(DB_NAME, DB_VERSION, {
-      upgrade(db, oldVersion) {
-        if (oldVersion < 1) {
-          db.createObjectStore(STORE, { keyPath: ["accountId", "deviceId"] });
+      upgrade(db) {
+        // v2 schema-of-record: keyPath = "deviceId". Handles fresh installs
+        // (no stores yet) and any pre-launch v1 carriers (delete + recreate is
+        // safe because v1 never shipped a real user). Channel-scoped DB name
+        // means stable and canary upgrade independently.
+        if (db.objectStoreNames.contains(STORE)) {
+          db.deleteObjectStore(STORE);
         }
+        db.createObjectStore(STORE, { keyPath: "deviceId" });
       },
     });
   }
@@ -64,24 +74,21 @@ export class TileLayoutRepo {
    * current registry to absorb modules added in newer web versions.
    */
   async getOrDefault(args: {
-    accountId: string;
     deviceId: string;
     platform: string;
   }): Promise<TileLayout> {
     const db = await getDb();
-    const rec = await db.get(STORE, [args.accountId, args.deviceId]);
+    const rec = await db.get(STORE, args.deviceId);
     if (!rec) return defaultLayoutForPlatform(args.platform);
     return mergeLayoutWithRegistry(recordToLayout(rec), args.platform);
   }
 
   async save(args: {
-    accountId: string;
     deviceId: string;
     layout: TileLayout;
   }): Promise<void> {
     const db = await getDb();
     await db.put(STORE, {
-      accountId: args.accountId,
       deviceId: args.deviceId,
       order: args.layout.order,
       wide: args.layout.wide,
@@ -90,28 +97,22 @@ export class TileLayoutRepo {
     });
   }
 
-  async deleteForAccount(accountId: string): Promise<void> {
-    const db = await getDb();
-    const tx = db.transaction(STORE, "readwrite");
-    const store = tx.objectStore(STORE);
-    let cursor = await store.openCursor();
-    while (cursor) {
-      if (cursor.key[0] === accountId) {
-        await cursor.delete();
-      }
-      cursor = await cursor.continue();
-    }
-    await tx.done;
-  }
-
-  /** Hard reset — drops the whole DB. Used by sign-out. */
+  /**
+   * Hard reset — closes the open connection (if any) and drops the whole DB.
+   * Used by sign-out + test isolation.
+   *
+   * Uses `idb`'s {@link deleteDB} rather than `indexedDB.deleteDatabase()`
+   * — the latter returns an `IDBOpenDBRequest`, not a Promise, so awaiting it
+   * is a no-op and the caller would race past while deletion is still in
+   * flight.
+   */
   async wipeAll(): Promise<void> {
     if (dbPromise) {
       const db = await dbPromise;
       db.close();
       dbPromise = null;
     }
-    await indexedDB.deleteDatabase(DB_NAME);
+    await deleteDB(DB_NAME);
   }
 }
 

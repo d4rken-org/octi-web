@@ -2,6 +2,7 @@
   import { onDestroy, onMount } from "svelte";
 
   import { createOrJoinAccount } from "../protocol/octi-api";
+  import { octiServerConnectorId } from "../protocol/connector-id";
   import { decodeLinkingData } from "../linking/linking-data";
   import { openCameraStream, scanQrFromVideo } from "../linking/qr";
   import { credentialsRepo, type CredentialRecord } from "../storage/credentials-repo";
@@ -54,16 +55,23 @@
       deviceTag: { version: OCTI_WEB_VERSION, label: deviceLabel.trim() || "Browser" },
       shareCode: link.shareCode.code,
     });
+    const now = Date.now();
     const record: CredentialRecord = {
+      connectorId: octiServerConnectorId(link.serverAddress, account.account),
+      connectorType: "kserver",
       accountId: account.account,
       devicePassword: account.password,
       ownDeviceId: deviceId,
       deviceLabel: deviceLabel.trim() || "Browser",
       serverAddress: link.serverAddress,
       encryptionKeyset: link.encryptionKeySet.key, // inherited, see LinkPaste comment
-      createdAt: Date.now(),
+      createdAt: now,
+      updatedAt: now,
     };
-    await credentialsRepo.save(record);
+    // Atomic replace: preserves single-credential UX during the multi-connector
+    // transition. Drop the replaceAllWith call (use save) when multi-connector
+    // lands.
+    await credentialsRepo.replaceAllWith(record);
     onDone();
   }
 

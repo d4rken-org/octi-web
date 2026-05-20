@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
 
-  import { listDevices, OctiApiError } from "../protocol/octi-api";
+  import { OctiApiError } from "../protocol/octi-api";
+  import { OctiServerConnector } from "../protocol/octi-server-connector";
   import { startPollLoop } from "../sync/poll-loop";
   import type { DeviceMetadata } from "../protocol/models";
   import { credentialsRepo, type CredentialRecord } from "../storage/credentials-repo";
@@ -46,7 +47,6 @@
   import { tileLayoutRepo } from "../storage/tile-layout-repo";
   import type { TileLayout } from "../modules/module-registry";
   import {
-    connectorIdString,
     downloadSharedFile,
     uploadFile,
     type SharedFile,
@@ -71,6 +71,16 @@
    * the post-edit value.
    */
   let activeRecord = $state<CredentialRecord>(record);
+
+  /**
+   * Connector + crypti are both derived from `activeRecord` so a Settings
+   * rename rebuilds them automatically. Previously these were `const` bound
+   * to the immutable `record` prop — harmless today because rename only
+   * mutates `deviceLabel`, but a latent bug for any future rename-mutable
+   * field that fed into crypto / auth.
+   */
+  const connector = $derived(new OctiServerConnector(activeRecord));
+  const crypti = $derived(createPayloadEncryption(activeRecord.encryptionKeyset));
 
   interface EnrichedDevice {
     raw: DeviceMetadata;
@@ -110,14 +120,6 @@
    */
   let tileLayouts = $state<Record<string, TileLayout>>({});
 
-  const creds = {
-    accountId: record.accountId,
-    devicePassword: record.devicePassword,
-    deviceId: record.ownDeviceId,
-  };
-  const crypti = createPayloadEncryption(record.encryptionKeyset);
-  const ownConnectorId = connectorIdString(record.serverAddress, record.accountId);
-
   /**
    * Open a hidden file input from anywhere — used by the own-device FilesTile
    * quick-action button (which doesn't have its own input element).
@@ -145,11 +147,9 @@
     uploadStatus = `Uploading "${file.name}"…`;
     try {
       await uploadFile({
-        server: record.serverAddress,
-        creds,
+        connector,
         crypti,
         blobCipher,
-        record,
         file,
         onProgress,
       });
@@ -164,8 +164,7 @@
   async function downloadFile(file: SharedFile, ownerDeviceId: string) {
     if (!blobCipher) throw new Error("Blob cipher not ready");
     const result = await downloadSharedFile({
-      server: record.serverAddress,
-      creds,
+      connector,
       blobCipher,
       ownerDeviceId,
       file,
@@ -183,13 +182,7 @@
 
   async function publishClipboardText(text: string) {
     const info = textClipboard(text);
-    await publishOwnClipboard({
-      server: record.serverAddress,
-      creds,
-      crypti,
-      ownDeviceId: record.ownDeviceId,
-      info,
-    });
+    await publishOwnClipboard({ connector, crypti, info });
     void refresh();
   }
 
@@ -201,7 +194,6 @@
   async function ensureLayoutFor(deviceId: string, platform: string | null) {
     if (tileLayouts[deviceId]) return;
     const layout = await tileLayoutRepo.getOrDefault({
-      accountId: record.accountId,
       deviceId,
       platform: (platform ?? "unknown").toLowerCase(),
     });
@@ -210,7 +202,7 @@
 
   async function persistLayout(deviceId: string, next: TileLayout) {
     tileLayouts = { ...tileLayouts, [deviceId]: next };
-    await tileLayoutRepo.save({ accountId: record.accountId, deviceId, layout: next });
+    await tileLayoutRepo.save({ deviceId, layout: next });
   }
 
   /**
@@ -236,7 +228,7 @@
     loading = true;
     loadError = null;
     try {
-      const list = await listDevices({ server: record.serverAddress, creds });
+      const list = await connector.listDevices();
       // Per device, fetch all seven module payloads in parallel. Each subcall
       // isolates its own errors so a rotten payload on one module doesn't blank
       // the whole row. Power/Wifi/Connectivity/Apps go through the generic
@@ -248,27 +240,26 @@
           const peerId = raw.id;
           const [metaRes, clipRes, filesRes, powerRes, wifiRes, connRes, appsRes] =
             await Promise.all([
-              fetchPeerMetaInfo({ server: record.serverAddress, creds, crypti, peerDeviceId: peerId })
+              fetchPeerMetaInfo({ connector, crypti, peerDeviceId: peerId })
                 .then((meta) => ({ meta, metaError: null as string | null }))
                 .catch((e) => ({
                   meta: null as MetaInfo | null,
                   metaError: e instanceof Error ? e.message : String(e),
                 })),
-              fetchPeerClipboard({ server: record.serverAddress, creds, crypti, peerDeviceId: peerId })
+              fetchPeerClipboard({ connector, crypti, peerDeviceId: peerId })
                 .then((clipboard) => ({ clipboard, clipboardError: null as string | null }))
                 .catch((e) => ({
                   clipboard: null as ClipboardInfo | null,
                   clipboardError: e instanceof Error ? e.message : String(e),
                 })),
-              fetchPeerFileShareInfo({ server: record.serverAddress, creds, crypti, peerDeviceId: peerId })
+              fetchPeerFileShareInfo({ connector, crypti, peerDeviceId: peerId })
                 .then((fileShare) => ({ fileShare, fileShareError: null as string | null }))
                 .catch((e) => ({
                   fileShare: null as FileShareInfo | null,
                   fileShareError: e instanceof Error ? e.message : String(e),
                 })),
               fetchPeerModule({
-                server: record.serverAddress,
-                creds,
+                connector,
                 crypti,
                 peerDeviceId: peerId,
                 moduleId: POWER_MODULE_ID,
@@ -281,8 +272,7 @@
                   powerError: e instanceof Error ? e.message : String(e),
                 })),
               fetchPeerModule({
-                server: record.serverAddress,
-                creds,
+                connector,
                 crypti,
                 peerDeviceId: peerId,
                 moduleId: WIFI_MODULE_ID,
@@ -295,8 +285,7 @@
                   wifiError: e instanceof Error ? e.message : String(e),
                 })),
               fetchPeerModule({
-                server: record.serverAddress,
-                creds,
+                connector,
                 crypti,
                 peerDeviceId: peerId,
                 moduleId: CONNECTIVITY_MODULE_ID,
@@ -312,8 +301,7 @@
                   connectivityError: e instanceof Error ? e.message : String(e),
                 })),
               fetchPeerModule({
-                server: record.serverAddress,
-                creds,
+                connector,
                 crypti,
                 peerDeviceId: peerId,
                 moduleId: APPS_MODULE_ID,
@@ -363,14 +351,9 @@
     publishStatus = "publishing";
     publishError = null;
     try {
-      // Use activeRecord so a Republish after a Settings rename publishes the
-      // new label, not the original prop value.
-      await publishOwnMetaInfo({
-        server: activeRecord.serverAddress,
-        creds,
-        crypti,
-        record: activeRecord,
-      });
+      // connector derives from activeRecord, so a Republish after Settings
+      // rename publishes the new label.
+      await publishOwnMetaInfo({ connector, crypti });
       publishStatus = "done";
     } catch (e) {
       publishStatus = "error";
@@ -387,18 +370,18 @@
     ) {
       return;
     }
-    // Wipe both DBs together — credentials + tile layouts. Either may fail
-    // silently on a private-browsing context; that's fine because reload then
-    // re-opens fresh databases anyway.
+    // Wipe both DBs together — credentials + tile layouts. wipeAll() closes
+    // the open connection in addition to clearing, so the next link/create
+    // flow opens a fresh DB cleanly.
     await Promise.all([
-      credentialsRepo.wipe().catch(() => undefined),
+      credentialsRepo.wipeAll().catch(() => undefined),
       tileLayoutRepo.wipeAll().catch(() => undefined),
     ]);
     onSignOut();
   }
 
   onMount(async () => {
-    blobCipher = await createBlobCipher(record.encryptionKeyset);
+    blobCipher = await createBlobCipher(activeRecord.encryptionKeyset);
     await publishOwn();
     // Poll loop drives refresh; refreshOnStart fires it immediately.
     stopPollLoop = startPollLoop(refresh);
@@ -468,6 +451,14 @@
   }
 
   function handleRecordUpdated(next: CredentialRecord) {
+    // Bump refreshSeq + drop the ETag cache so any in-flight refresh tagged
+    // with the old connector identity is discarded when it lands, and the
+    // next tick re-fetches against the fresh connector. Today Settings only
+    // changes `deviceLabel` (connector identity unchanged), but treat record
+    // edits as connector-invalidating so future fields that ARE identity-
+    // critical (server, account, key) don't reintroduce the bug.
+    refreshSeq++;
+    etagCache.clear();
     activeRecord = next;
   }
 
@@ -519,7 +510,7 @@
             {isSelf}
             {layout}
             data={d}
-            {ownConnectorId}
+            ownConnectorId={connector.connectorId}
             onLayoutChange={(next) => void persistLayout(d.raw.id, next)}
             onClipboardPasteOs={isSelf ? pasteOsAndPublishClipboard : undefined}
             onClipboardPublishText={isSelf ? publishClipboardText : undefined}
@@ -553,7 +544,7 @@
 
 {#if showShareSheet}
   <Sheet title="Add another device" subtitle="Share a one-time code or QR" wide onClose={closeShareSheet}>
-    <ShareCode />
+    <ShareCode {connector} />
   </Sheet>
 {/if}
 

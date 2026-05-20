@@ -1,18 +1,7 @@
 import { buildAssociatedData, type PayloadEncryption } from "../crypto/payload";
 import { type BlobCipher } from "../crypto/blob-cipher";
-import {
-  type AuthCreds,
-  commitModule,
-  readModulePayloadWithEtag,
-} from "../protocol/octi-api";
-import {
-  downloadBlob,
-  sha256Hex,
-  uploadBlobBytes,
-} from "../protocol/blob-session";
-import type { ServerAddress } from "../protocol/models";
-import type { CredentialRecord } from "../storage/credentials-repo";
-import { OCTI_WEB_VERSION } from "../version";
+import { sha256Hex } from "../protocol/blob-session";
+import type { OctiServerConnector } from "../protocol/octi-server-connector";
 
 /**
  * TS mirror of {@code eu.darken.octi.modules.files.core.FileShareInfo}. Wire
@@ -36,13 +25,12 @@ import { OCTI_WEB_VERSION } from "../version";
  * v1: we publish + consume `files` only. `deleteRequests` is read but not
  * issued / consumed (M6 acceptance only covers upload + list + download;
  * delete-flow stays for v2, see plan).
+ *
+ * Connector-id format on the wire is `kserver-<domain>-<accountId>` — produced
+ * once at credential creation time and stored on the record as
+ * `OctiServerCredentialRecord.connectorId`. Read it via `connector.connectorId`.
  */
 export const FILES_MODULE_ID = "eu.darken.octi.module.core.files";
-
-/** Connector ID format from Android's `ConnectorId.idString`: `"kserver-<domain>-<accountId>"`. */
-export function connectorIdString(server: ServerAddress, accountId: string): string {
-  return `kserver-${server.domain}-${accountId}`;
-}
 
 export interface SharedFile {
   name: string;
@@ -98,8 +86,7 @@ export function deserializeFileShareInfo(bytes: Uint8Array): FileShareInfo {
  * than null) when the peer has no payload yet — simplifies the dashboard merge.
  */
 export async function fetchPeerFileShareInfo(args: {
-  server: ServerAddress;
-  creds: AuthCreds;
+  connector: OctiServerConnector;
   crypti: PayloadEncryption;
   peerDeviceId: string;
 }): Promise<FileShareInfo> {
@@ -108,14 +95,11 @@ export async function fetchPeerFileShareInfo(args: {
 }
 
 async function fetchPeerFileShareInfoWithEtag(args: {
-  server: ServerAddress;
-  creds: AuthCreds;
+  connector: OctiServerConnector;
   crypti: PayloadEncryption;
   peerDeviceId: string;
 }): Promise<{ info: FileShareInfo; etag: string | null }> {
-  const result = await readModulePayloadWithEtag({
-    server: args.server,
-    creds: args.creds,
+  const result = await args.connector.readModulePayloadWithEtag({
     targetDeviceId: args.peerDeviceId,
     moduleId: FILES_MODULE_ID,
   });
@@ -152,33 +136,30 @@ export interface UploadResult {
  *   3. Encrypt with the streaming blob cipher (AAD includes blobKey)
  *   4. Upload encrypted bytes via blob-session API → server blobId
  *   5. Read our own current FileShareInfo
- *   6. Append a fresh SharedFile entry; encrypt + POST module payload
+ *   6. Append a fresh SharedFile entry; encrypt + commit module payload
  *
  * Default expiry: 30 days (matches the Android convention).
  */
 export async function uploadFile(args: {
-  server: ServerAddress;
-  creds: AuthCreds;
+  connector: OctiServerConnector;
   crypti: PayloadEncryption;
   blobCipher: BlobCipher;
-  record: CredentialRecord;
   file: File;
   onProgress?: (bytes: number, total: number) => void;
 }): Promise<UploadResult> {
+  const ownDeviceId = args.connector.ownDeviceId;
+  const connectorIdStr = args.connector.connectorId;
   const plaintextBytes = new Uint8Array(await args.file.arrayBuffer());
   const plaintextChecksum = await sha256Hex(plaintextBytes);
   const blobKey = `sha256:${plaintextChecksum}`;
   const ciphertext = await args.blobCipher.encrypt(
     plaintextBytes,
-    args.record.ownDeviceId,
+    ownDeviceId,
     FILES_MODULE_ID,
     blobKey,
   );
-  const blobId = await uploadBlobBytes({
-    server: args.server,
-    creds: args.creds,
-    version: OCTI_WEB_VERSION,
-    targetDeviceId: args.record.ownDeviceId,
+  const blobId = await args.connector.uploadBlobBytes({
+    targetDeviceId: ownDeviceId,
     moduleId: FILES_MODULE_ID,
     ciphertext,
     onProgress: args.onProgress,
@@ -186,7 +167,6 @@ export async function uploadFile(args: {
 
   const now = new Date();
   const expires = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
-  const connectorIdStr = connectorIdString(args.server, args.record.accountId);
   const shared: SharedFile = {
     name: args.file.name || "unnamed",
     mimeType: args.file.type || "application/octet-stream",
@@ -204,10 +184,9 @@ export async function uploadFile(args: {
   // blobs alive that are referenced by the latest module commit, so a POST
   // would orphan our just-uploaded blob and the next GC tick would 404 it.
   const { info: current, etag } = await fetchPeerFileShareInfoWithEtag({
-    server: args.server,
-    creds: args.creds,
+    connector: args.connector,
     crypti: args.crypti,
-    peerDeviceId: args.record.ownDeviceId,
+    peerDeviceId: ownDeviceId,
   });
   // De-dupe by blobKey: re-uploading the same content replaces the entry.
   const filtered = current.files.filter((f) => f.blobKey !== blobKey);
@@ -215,15 +194,13 @@ export async function uploadFile(args: {
     files: [...filtered, shared],
     deleteRequests: current.deleteRequests,
   };
-  const modulePayloadAad = buildAssociatedData(args.record.ownDeviceId, FILES_MODULE_ID);
+  const modulePayloadAad = buildAssociatedData(ownDeviceId, FILES_MODULE_ID);
   const documentBytes = args.crypti.encrypt(serializeFileShareInfo(next), modulePayloadAad);
   // blobRefs must include every blob the new document references — server
   // *replaces* (doesn't merge) the link set on each commit.
   const allBlobIds = collectBlobIdsOnServer(next, connectorIdStr);
-  await commitModule({
-    server: args.server,
-    creds: args.creds,
-    targetDeviceId: args.record.ownDeviceId,
+  await args.connector.commitModule({
+    targetDeviceId: ownDeviceId,
     moduleId: FILES_MODULE_ID,
     documentBytes,
     blobIds: allBlobIds,
@@ -244,23 +221,19 @@ export interface DownloadedFile {
  * partial/corrupt bytes.
  */
 export async function downloadSharedFile(args: {
-  server: ServerAddress;
-  creds: AuthCreds;
+  connector: OctiServerConnector;
   blobCipher: BlobCipher;
   ownerDeviceId: string;
   file: SharedFile;
 }): Promise<DownloadedFile> {
-  const connectorIdStr = connectorIdString(args.server, args.creds.accountId);
+  const connectorIdStr = args.connector.connectorId;
   const blobId = args.file.connectorRefs[connectorIdStr];
   if (!blobId) {
     throw new Error(
       `File "${args.file.name}" isn't stored on this server (${connectorIdStr}); available on: ${Object.keys(args.file.connectorRefs).join(", ") || "(none)"}`,
     );
   }
-  const ciphertext = await downloadBlob({
-    server: args.server,
-    creds: args.creds,
-    version: OCTI_WEB_VERSION,
+  const ciphertext = await args.connector.downloadBlob({
     targetDeviceId: args.ownerDeviceId,
     moduleId: FILES_MODULE_ID,
     blobId,
