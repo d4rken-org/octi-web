@@ -1,17 +1,20 @@
 name: Rolling canary build
 
-# Every push to main rebuilds the canary channel. Publishes the `:canary` Docker
-# image; the Pages canary subpath at web.octi.darken.eu/canary/ is deployed by
-# the separate deploy-pages.yml (workflow_run on this workflow's success).
+# Triggered after the "Code tests & eval" workflow succeeds on main — so
+# :canary always reflects the latest *tested* commit, never an untested or
+# red-on-main one. Publishes the `:canary` Docker image; the Pages canary
+# subpath at web.octi.darken.eu/canary/ is deployed by the separate
+# deploy-pages.yml (workflow_run on this workflow's success).
 #
 # Naming follows the cross-vendor convention (Chrome Canary, GitHub canary
 # deploys). The companion in-app banner says "Canary build" + "This is a
 # bleeding edge build" — see src/ui/CanaryBanner.svelte.
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
+  workflow_run:
+    workflows: ["Code tests & eval"]
+    types: [completed]
 
 permissions:
   contents: read
@@ -23,6 +26,14 @@ permissions:
 jobs:
   compute-version:
     name: Compute canary version
+    # workflow_dispatch always proceeds; workflow_run only when the upstream
+    # code-checks completed successfully on a push to main (skip PR runs and
+    # failures). Mirrors deploy-pages.yml's filter pattern.
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-22.04
     concurrency:
       group: release-canary-build-${{ github.repository }}
@@ -45,6 +56,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          # Pin to the SHA that code-checks tested. With workflow_run trigger,
+          # github.sha is the default-branch tip at trigger time (which may
+          # have moved past the tested SHA); workflow_run.head_sha is the SHA
+          # the upstream actually ran on. Falls back to github.sha for
+          # workflow_dispatch.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 2
           persist-credentials: false
 
@@ -99,10 +116,13 @@ jobs:
           persist-credentials: false
 
       - name: Stale-SHA guard
-        # If main moved past us during the build window, abort. A newer canary
-        # run is on the way and we shouldn't move the `:canary` tag backwards.
+        # If main moved past the tested SHA during the build window, abort. A
+        # newer code-checks run will trigger a newer canary publish and we
+        # shouldn't move `:canary` backwards. EXPECTED_SHA is the SHA that
+        # code-checks ran on (workflow_run.head_sha); falls back to github.sha
+        # for workflow_dispatch.
         env:
-          EXPECTED_SHA: ${{ github.sha }}
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
           set -euo pipefail
           actual=$(git rev-parse HEAD)
@@ -136,5 +156,5 @@ jobs:
           build-args: |
             VITE_BASE=/
             VITE_CHANNEL=canary
-            VITE_COMMIT_SHA=${{ github.sha }}
+            VITE_COMMIT_SHA=${{ github.event.workflow_run.head_sha || github.sha }}
             VITE_APP_VERSION=${{ needs.compute-version.outputs.version }}
