@@ -1,25 +1,35 @@
 import { describe, expect, it, vi } from "vitest";
-import type { OctiServerConnector } from "../protocol/octi-server-connector";
 import type { BlobCipher } from "../crypto/blob-cipher";
 import type { PayloadEncryption } from "../crypto/payload";
+import { octiServerConnectorId } from "../protocol/connector-id";
+import type { ServerAddress } from "../protocol/models";
+import type { OctiServerConnector } from "../protocol/octi-server-connector";
 import {
+  deserializeFileShareInfo,
   downloadSharedFile,
+  type FileShareInfo,
+  serializeFileShareInfo,
   type SharedFile,
   uploadFile,
 } from "./files";
 
 /**
- * These tests pin the connector-id wire keying for FileShareInfo:
- *  - uploadFile writes `availableOn[]` and `connectorRefs{}` keyed by the
- *    uploading connector's id (matches the Android peer's expectations).
- *  - downloadSharedFile looks up by our connector id and refuses files
- *    that aren't stored on our server.
+ * These tests cover two layers of the files module:
  *
- * They mock both the connector and the crypto layer so the assertions are
- * about *what* gets written to FileShareInfo, not about wire bytes.
+ *  1. **Behavior** — uploadFile keys `availableOn[]` / `connectorRefs{}` by
+ *     the uploading connector's id; downloadSharedFile looks up by our
+ *     connector id and refuses files that aren't stored on our server.
+ *  2. **Wire format** — `FileShareInfo` round-trips byte-exactly through
+ *     serialize/deserialize, null-strips for the Android strict decoder,
+ *     emits `connectorRefs` map values as bare strings (matching Android's
+ *     `@JvmInline value class RemoteBlobRef`), and coerces empty/partial
+ *     payloads to the canonical empty shape.
+ *
+ * Behavior tests mock the connector and crypto layer. Wire-format tests
+ * exercise the real (de)serializers against fixed samples.
  */
 
-const CONNECTOR_ID = "kserver-sync.test-acct-1";
+const FAKE_CONNECTOR_ID = "kserver-sync.test-acct-1";
 const OWN_DEVICE_ID = "dev-1";
 
 function makeFakeConnector(overrides: Partial<{
@@ -29,7 +39,7 @@ function makeFakeConnector(overrides: Partial<{
   commitModule: ReturnType<typeof vi.fn>;
 }> = {}): OctiServerConnector {
   return {
-    connectorId: CONNECTOR_ID,
+    connectorId: FAKE_CONNECTOR_ID,
     ownDeviceId: OWN_DEVICE_ID,
     uploadBlobBytes: overrides.uploadBlobBytes ?? vi.fn(async () => "server-blob-id-42"),
     downloadBlob: overrides.downloadBlob ?? vi.fn(async () => new Uint8Array([7, 7, 7])),
@@ -70,8 +80,8 @@ describe("uploadFile wire keying", () => {
       file,
     });
 
-    expect(res.shared.availableOn).toEqual([CONNECTOR_ID]);
-    expect(res.shared.connectorRefs).toEqual({ [CONNECTOR_ID]: "server-blob-id-42" });
+    expect(res.shared.availableOn).toEqual([FAKE_CONNECTOR_ID]);
+    expect(res.shared.connectorRefs).toEqual({ [FAKE_CONNECTOR_ID]: "server-blob-id-42" });
 
     // commitModule receives the blob id we just uploaded (server replaces, not merges).
     // First write on this module → If-None-Match: *. The ifMatch key is absent
@@ -99,8 +109,8 @@ describe("downloadSharedFile wire keying", () => {
       checksum: await sha256OfBytes(new Uint8Array([4, 5, 6])),
       sharedAt: new Date(0).toISOString(),
       expiresAt: new Date(0).toISOString(),
-      availableOn: [CONNECTOR_ID],
-      connectorRefs: { [CONNECTOR_ID]: "remote-blob-77" },
+      availableOn: [FAKE_CONNECTOR_ID],
+      connectorRefs: { [FAKE_CONNECTOR_ID]: "remote-blob-77" },
     };
 
     const out = await downloadSharedFile({
@@ -155,8 +165,8 @@ describe("downloadSharedFile wire keying", () => {
       checksum: "f".repeat(64), // never matches the actual content's hash
       sharedAt: new Date(0).toISOString(),
       expiresAt: new Date(0).toISOString(),
-      availableOn: [CONNECTOR_ID],
-      connectorRefs: { [CONNECTOR_ID]: "remote-blob-77" },
+      availableOn: [FAKE_CONNECTOR_ID],
+      connectorRefs: { [FAKE_CONNECTOR_ID]: "remote-blob-77" },
     };
 
     await expect(
@@ -167,6 +177,103 @@ describe("downloadSharedFile wire keying", () => {
         file,
       }),
     ).rejects.toThrow(/Checksum mismatch/);
+  });
+});
+
+describe("FileShareInfo wire format", () => {
+  const WIRE_SERVER: ServerAddress = {
+    domain: "prod.kserver.octi.darken.eu",
+    protocol: "https",
+    port: 443,
+  };
+  const WIRE_ACCOUNT_ID = "11111111-1111-1111-1111-111111111111";
+  const WIRE_CONNECTOR_ID = octiServerConnectorId(WIRE_SERVER, WIRE_ACCOUNT_ID);
+
+  const sharedFile: SharedFile = {
+    name: "report.pdf",
+    mimeType: "application/pdf",
+    size: 12345,
+    blobKey: "sha256:deadbeef",
+    checksum: "deadbeef",
+    sharedAt: "2026-05-17T22:00:00Z",
+    expiresAt: "2026-06-16T22:00:00Z",
+    availableOn: [WIRE_CONNECTOR_ID],
+    connectorRefs: { [WIRE_CONNECTOR_ID]: "blob-id-opaque-xyz" },
+  };
+
+  const sample: FileShareInfo = {
+    files: [sharedFile],
+    deleteRequests: [
+      {
+        targetDeviceId: "22222222-2222-2222-2222-222222222222",
+        blobKey: "sha256:cafebabe",
+        requestedAt: "2026-05-17T22:00:00Z",
+        retainUntil: "2026-05-24T22:00:00Z",
+      },
+    ],
+  };
+
+  it("round-trips through serialize/deserialize", () => {
+    const bytes = serializeFileShareInfo(sample);
+    expect(deserializeFileShareInfo(bytes)).toEqual(sample);
+  });
+
+  it("emits connectorRefs map value as a bare string (Android @JvmInline RemoteBlobRef)", () => {
+    // RemoteBlobRef is a value class over String; flattening it to an object
+    // like { id: "..." } would strict-fail on the Android decoder.
+    const json = JSON.parse(new TextDecoder().decode(serializeFileShareInfo(sample)));
+    expect(json.files[0].connectorRefs).toEqual({ [WIRE_CONNECTOR_ID]: "blob-id-opaque-xyz" });
+    expect(typeof json.files[0].connectorRefs[WIRE_CONNECTOR_ID]).toBe("string");
+  });
+
+  it("emits availableOn as a plain array of connector-id strings", () => {
+    const json = JSON.parse(new TextDecoder().decode(serializeFileShareInfo(sample)));
+    expect(json.files[0].availableOn).toEqual([WIRE_CONNECTOR_ID]);
+  });
+
+  it("preserves all SharedFile wire keys exactly", () => {
+    // Pins the JSON key set — adding/renaming a field needs a sister Android
+    // change, and this test forces that conversation.
+    const json = JSON.parse(new TextDecoder().decode(serializeFileShareInfo(sample)));
+    expect(Object.keys(json.files[0]).sort()).toEqual(
+      [
+        "availableOn",
+        "blobKey",
+        "checksum",
+        "connectorRefs",
+        "expiresAt",
+        "mimeType",
+        "name",
+        "sharedAt",
+        "size",
+      ].sort(),
+    );
+  });
+
+  it("drops null-valued fields on the wire (Android strict-decoder compat)", () => {
+    // Same null-stripping rule as MetaInfo — Android's strict decoder rejects
+    // null for fields with non-nullable custom serializers.
+    const withNulls = {
+      ...sample,
+      files: [{ ...sharedFile, mimeType: null as unknown as string }],
+    };
+    const json = JSON.parse(new TextDecoder().decode(serializeFileShareInfo(withNulls)));
+    expect("mimeType" in json.files[0]).toBe(false);
+    expect(json.files[0].name).toBe(sharedFile.name);
+  });
+
+  it("deserializes an empty top-level object to the empty FileShareInfo (forward-compat)", () => {
+    // Older / freshly-initialised peers may publish `{}` before they have any
+    // files; we coerce to the empty shape so the dashboard merge doesn't NPE.
+    const bytes = new TextEncoder().encode("{}");
+    expect(deserializeFileShareInfo(bytes)).toEqual({ files: [], deleteRequests: [] });
+  });
+
+  it("deserializes a payload with only files (no deleteRequests key)", () => {
+    const bytes = new TextEncoder().encode(JSON.stringify({ files: [sharedFile] }));
+    const out = deserializeFileShareInfo(bytes);
+    expect(out.files).toEqual([sharedFile]);
+    expect(out.deleteRequests).toEqual([]);
   });
 });
 
