@@ -9,11 +9,24 @@
 
   let mode = $state<Mode>("choose");
 
-  let { onDone }: { onDone: () => void } = $props();
+  let {
+    onDone,
+    manageScreenshotMarker = true,
+  }: {
+    onDone: () => void;
+    /**
+     * When true (default), `Onboarding` sets `data-screenshot-ready="onboarding"`
+     * on mount and removes it on destroy. Set to false when the component is
+     * mounted INSIDE another screen (e.g. the dashboard's "Add another sync
+     * source" sheet) so the outer screen's screenshot marker stays in charge.
+     */
+    manageScreenshotMarker?: boolean;
+  } = $props();
 
   // Marker for screenshot CI (Playwright). The mount path is synchronous; the
   // screen is ready as soon as the script runs.
   onMount(() => {
+    if (!manageScreenshotMarker) return;
     document.documentElement.setAttribute("data-screenshot-ready", "onboarding");
     return () => {
       // Clear when this screen unmounts so the next screen's ready signal can settle.

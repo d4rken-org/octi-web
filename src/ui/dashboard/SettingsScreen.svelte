@@ -31,14 +31,23 @@
   let {
     record,
     ownDeviceId,
+    connectorCount = 1,
     onRecordUpdated,
+    onOpenSyncSources,
     onSignOut,
     onClose,
   }: {
     record: CredentialRecord;
     /** Per-install own-device UUID, threaded from App.svelte → DashboardStub. */
     ownDeviceId: string;
+    /** Number of linked sync sources. Drives the secondary line under the
+     *  "Sync sources" row. Optional so the prop is back-compat with the
+     *  single-connector entry point. */
+    connectorCount?: number;
     onRecordUpdated: (next: CredentialRecord) => void;
+    /** Opens the multi-connector Sync Sources screen. When omitted (e.g. in
+     *  tests), the row is hidden. */
+    onOpenSyncSources?: () => void;
     onSignOut: () => void;
     onClose: () => void;
   } = $props();
@@ -164,6 +173,21 @@
       </div>
     {/if}
   </section>
+
+  {#if onOpenSyncSources}
+    <section class="block">
+      <h3 class="h3">Sync sources</h3>
+      <p class="hint">
+        Manage every Octi-server account this browser is linked to — add a new
+        sync source, view per-connector devices, or disconnect one.
+      </p>
+      <div class="row">
+        <button type="button" onclick={onOpenSyncSources} data-testid="settings-open-sources">
+          {connectorCount} linked · Manage…
+        </button>
+      </div>
+    </section>
+  {/if}
 
   <section class="block">
     <h3 class="h3">About</h3>

@@ -10,11 +10,14 @@
   import { tileLayoutRepo } from "../storage/tile-layout-repo";
   import { OCTI_WEB_DISPLAY_VERSION } from "../version";
   import DeviceCard from "./dashboard/DeviceCard.svelte";
+  import IssuesSummarySheet from "./dashboard/IssuesSummarySheet.svelte";
   import NavBar from "./dashboard/NavBar.svelte";
   import type { MenuItem } from "./dashboard/OverflowMenu.svelte";
   import { sortDevicesSelfFirst } from "./dashboard/order";
   import SettingsScreen from "./dashboard/SettingsScreen.svelte";
   import Sheet from "./dashboard/Sheet.svelte";
+  import SyncSourcesScreen from "./dashboard/SyncSourcesScreen.svelte";
+  import Onboarding from "./Onboarding.svelte";
   import ShareCode from "./ShareCode.svelte";
 
   let {
@@ -55,6 +58,9 @@
   let publishError = $state<string | null>(null);
   let showShareSheet = $state(false);
   let showSettings = $state(false);
+  let showSyncSources = $state(false);
+  let showIssues = $state(false);
+  let showAddSource = $state(false);
   let stopPollLoop: (() => void) | null = null;
   let uploadStatus = $state<string | null>(null);
 
@@ -247,6 +253,24 @@
   function closeShareSheet() {
     showShareSheet = false;
   }
+  function openSyncSources() {
+    showSyncSources = true;
+  }
+  function closeSyncSources() {
+    showSyncSources = false;
+  }
+  function openIssues() {
+    showIssues = true;
+  }
+  function closeIssues() {
+    showIssues = false;
+  }
+  function openAddSource() {
+    showAddSource = true;
+  }
+  function closeAddSource() {
+    showAddSource = false;
+  }
 
   /**
    * Settings rename: persist the new record, then sync the manager so its
@@ -258,9 +282,17 @@
     void manager.refreshAll();
   }
 
-  // mergedIssues exposed for future PR 3 issues sheet; for v1 we just bubble
-  // up the most-recent one as a banner under the nav.
-  const firstIssue = $derived(issues[0]);
+  /**
+   * Onboarding (CreateAccount / LinkPaste / LinkScan) completed inside the
+   * Add Source sheet — the new credential is already persisted. Pull it into
+   * the manager and trigger a refresh; the SyncSources screen behind us
+   * picks up the new card reactively.
+   */
+  async function handleAddSourceDone() {
+    showAddSource = false;
+    await manager.bootstrap();
+    void manager.refreshAll();
+  }
 
   const navMenuItems = $derived<MenuItem[]>([
     {
@@ -269,6 +301,11 @@
       disabled: publishStatus === "publishing",
     },
     { label: "Add another device", onClick: openShareSheet },
+    {
+      label: `Sync sources (${manager.connectors.length})`,
+      onClick: openSyncSources,
+      separatorBefore: true,
+    },
     { label: "Sign out", onClick: signOut, destructive: true, separatorBefore: true },
   ]);
 </script>
@@ -280,16 +317,15 @@
       version={OCTI_WEB_DISPLAY_VERSION}
       {lastSyncLabel}
       {loading}
+      issuesCount={issues.length}
       onRefresh={() => manager.refreshAll()}
+      onOpenIssues={openIssues}
       onOpenSettings={openSettings}
       menuItems={navMenuItems}
     />
 
     {#if publishStatus === "error" && publishError}
       <p class="banner err">MetaInfo publish failed: {publishError}</p>
-    {/if}
-    {#if firstIssue}
-      <p class="banner err">{firstIssue.message}</p>
     {/if}
     {#if uploadStatus}
       <p class="banner">{uploadStatus}</p>
@@ -337,7 +373,9 @@
   <SettingsScreen
     record={primaryRecord}
     {ownDeviceId}
+    connectorCount={manager.connectors.length}
     onRecordUpdated={handleRecordUpdated}
+    onOpenSyncSources={openSyncSources}
     onSignOut={signOut}
     onClose={closeSettings}
   />
@@ -346,6 +384,36 @@
 {#if showShareSheet && primaryConnector}
   <Sheet title="Add another device" subtitle="Share a one-time code or QR" wide onClose={closeShareSheet}>
     <ShareCode connector={primaryConnector} />
+  </Sheet>
+{/if}
+
+{#if showSyncSources}
+  <SyncSourcesScreen
+    {manager}
+    {ownDeviceId}
+    onAddSource={openAddSource}
+    onClose={closeSyncSources}
+  />
+{/if}
+
+{#if showIssues}
+  <IssuesSummarySheet
+    {manager}
+    onOpenSources={() => {
+      closeIssues();
+      openSyncSources();
+    }}
+    onClose={closeIssues}
+  />
+{/if}
+
+{#if showAddSource}
+  <Sheet title="Add a sync source" subtitle="Link this browser to another Octi server" wide onClose={closeAddSource}>
+    <!-- manageScreenshotMarker=false: this Onboarding is nested inside a
+         Sheet on top of the dashboard, so the outer screenshot marker
+         stays in charge. Without this the marker would flip to "onboarding"
+         on open and ping-pong back to "dashboard" on close. -->
+    <Onboarding onDone={handleAddSourceDone} manageScreenshotMarker={false} />
   </Sheet>
 {/if}
 

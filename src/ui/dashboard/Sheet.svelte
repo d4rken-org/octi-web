@@ -30,23 +30,23 @@
     children?: Snippet;
   } = $props();
 
-  let priorBodyOverflow: string | null = null;
+  import { lockBodyScroll, pushEscapeHandler } from "./modal-stack";
+
   let dialogEl = $state<HTMLDivElement | null>(null);
+  let releaseBodyLock: (() => void) | null = null;
+  let releaseEscape: (() => void) | null = null;
 
   function onBackdrop(e: MouseEvent) {
     if (e.target === e.currentTarget) onClose();
   }
 
-  function onKey(e: KeyboardEvent) {
-    if (e.key === "Escape") {
-      e.stopPropagation();
-      onClose();
-    }
-  }
-
   onMount(async () => {
-    priorBodyOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
+    // Refcounted body lock + topmost-only Escape routing. See modal-stack.ts.
+    // Pushing during mount registers us as the topmost responder; nested
+    // sheets / dialogs that mount after us push on top and take over until
+    // they unmount.
+    releaseBodyLock = lockBodyScroll();
+    releaseEscape = pushEscapeHandler(onClose);
     await tick();
     dialogEl?.focus();
 
@@ -67,25 +67,17 @@
   });
 
   onDestroy(() => {
-    if (priorBodyOverflow !== null) {
-      document.body.style.overflow = priorBodyOverflow;
-    }
+    releaseBodyLock?.();
+    releaseBodyLock = null;
+    releaseEscape?.();
+    releaseEscape = null;
     if (document.documentElement.getAttribute("data-screenshot-ready") === "tile-detail") {
       document.documentElement.setAttribute("data-screenshot-ready", "dashboard");
     }
   });
 </script>
 
-<svelte:window onkeydown={onKey} />
-
-<div
-  class="backdrop"
-  role="presentation"
-  onclick={onBackdrop}
-  onkeydown={(e) => {
-    if (e.key === "Escape") onClose();
-  }}
->
+<div class="backdrop" role="presentation" onclick={onBackdrop}>
   <div
     bind:this={dialogEl}
     class="sheet"
