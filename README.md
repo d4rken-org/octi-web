@@ -11,6 +11,16 @@ A browser client for [Octi](https://github.com/d4rken-org/octi), so all your dev
 stay in reach even when your phone isn't. Pairs with the same end-to-end encrypted
 [sync-server](https://github.com/d4rken-org/octi-server) as the Android and desktop apps.
 
+## Features
+
+- Pairs with the Octi Android app and Octi Desktop via paste-link or QR.
+- Supports the Android modules: clipboard, files, apps, wifi, power, connectivity.
+- File share: drag-and-drop upload across all paired devices.
+- End-to-end encrypted.
+
+Hungry for details? [Check the Octi wiki](https://github.com/d4rken-org/octi/wiki).
+Still have questions? [Join us on Discord](https://discord.gg/s7V4C6zuVy)!
+
 ## Use
 
 ### With the official Octi server
@@ -72,20 +82,12 @@ Browsers block HTTPS pages from talking to plain HTTP servers. If your sync-serv
 HTTP-only (LAN setup), serve your own SPA over HTTP on the same network — the public
 `web.octi.darken.eu` is HTTPS and can only reach HTTPS sync-servers.
 
-## Features
+## Octi ecosystem
 
-- Pair with phone/desktop via paste-link or QR scan; generate your own share code to
-  invite a new device.
-- Per-device cards mirroring the Android UI: clipboard, files, apps, wifi, power,
-  connectivity. Click any tile for a detail sheet with copyable fields.
-- File share: drag-and-drop upload, list across all devices, download with SHA-256
-  verification.
-- End-to-end encrypted (AES-256-GCM-SIV, Tink-keyset-compatible with Android peers).
-- No web backend of its own — only your sync-server, the browser, and the static SPA
-  bytes. Strict Content-Security-Policy: no remote scripts, no CDN, no analytics.
-
-Hungry for details? [Check the Octi wiki](https://github.com/d4rken-org/octi/wiki).
-Still have questions? [Join us on Discord](https://discord.gg/s7V4C6zuVy)!
+* [Octi](https://github.com/d4rken-org/octi) — the Android app.
+* [Octi Server](https://github.com/d4rken-org/octi-server) — the end-to-end encrypted sync-server.
+* [Octi Web](https://github.com/d4rken-org/octi-web) — this browser client.
+* [Octi Desktop](https://github.com/d4rken-org/octi-desktop) — Compose Multiplatform desktop client (Linux / macOS / Windows).
 
 ## License
 
@@ -95,10 +97,3 @@ Octi Web's code is available under a [GPL v3](LICENSE) license, this excludes:
 * Octi animations and videos.
 * Octi documentation.
 * Translations.
-
-## Octi family
-
-* [Octi](https://github.com/d4rken-org/octi) — the Android app.
-* [Octi Server](https://github.com/d4rken-org/octi-server) — the end-to-end encrypted sync-server.
-* [Octi Web](https://github.com/d4rken-org/octi-web) — this browser client.
-* [Octi Desktop](https://github.com/d4rken-org/octi-desktop) — Compose Multiplatform desktop client (Linux / macOS / Windows).
