@@ -51,3 +51,18 @@ Add crypto layer: Tink keyset parser + AES-GCM-SIV payload
   `Declare encryption capabilities…` commit for an example.
 - Open as draft only while CI is still red and you intend to keep iterating;
   flip to ready when you want review.
+- **Apply labels**. Before/just after opening the PR, run `gh label list` and
+  attach every label that fits the change. The triage dashboards key off
+  these — an unlabeled PR is invisible to anyone scanning by area. Typical
+  matches for this repo:
+    - `documentation` — `.claude/`, `README`, rule files, inline docs only.
+    - `enhancement` — new user-visible feature or capability.
+    - `bug` — fixes incorrect behaviour.
+    - `Build/Deploy` — CI workflows, Dockerfile, release tooling, `tools/`.
+    - `c: sync/octi` — touches the Octi-Server connector / wire protocol.
+    - `c: module` and `c: module/<name>` — touches `src/modules/` (apply
+      both the umbrella and the specific one when the change is module-scoped).
+    - `Translations` — string changes only.
+  Apply more than one when the change spans areas. `gh pr edit <n>
+  --add-label foo --add-label bar` works post-creation; passing
+  `--label foo,bar` to `gh pr create` works at creation time.
