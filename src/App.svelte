@@ -4,7 +4,6 @@
   import CanaryBanner from "./ui/CanaryBanner.svelte";
   import Onboarding from "./ui/Onboarding.svelte";
   import DashboardStub from "./ui/DashboardStub.svelte";
-  import { credentialsRepo } from "./storage/credentials-repo";
   import { ConnectorManager } from "./sync/connector-manager.svelte";
 
   /**
@@ -15,18 +14,23 @@
    * Going through the manager (not the credential record directly) is what
    * lets multiple linked accounts coexist: the dashboard sees a merged peer
    * view, the link/create flows just append a new credential and call
-   * {@code manager.addConnector(record)}.
+   * `await manager.bootstrap()`.
    */
   const manager = new ConnectorManager();
 
   let bootstrapping = $state(true);
-  /** True when at least one credential is linked; drives Onboarding vs Dashboard. */
-  let hasAnyConnector = $state(false);
+
+  /**
+   * Reactive derivation off `manager.connectors`: as soon as a disconnect
+   * empties the list (or a sign-out wipes everything), this flips back to
+   * `false` and the SPA re-renders {@link Onboarding}. Without reading the
+   * manager reactively, the dashboard would stay mounted with zero
+   * connectors after the user disconnects their last sync source.
+   */
+  const hasAnyConnector = $derived(manager.connectors.length > 0);
 
   async function reload() {
     await manager.bootstrap();
-    const records = await credentialsRepo.listAll();
-    hasAnyConnector = records.length > 0;
   }
 
   onMount(async () => {

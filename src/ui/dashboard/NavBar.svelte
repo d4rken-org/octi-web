@@ -19,7 +19,9 @@
     version,
     lastSyncLabel,
     loading,
+    issuesCount = 0,
     onRefresh,
+    onOpenIssues,
     onOpenSettings,
     menuItems,
   }: {
@@ -27,7 +29,12 @@
     version: string;
     lastSyncLabel: string;
     loading: boolean;
+    /** Number of active per-connector issues. When > 0 the bell button shows
+     *  a red dot + count; clicking opens {@link onOpenIssues}. */
+    issuesCount?: number;
     onRefresh: () => void;
+    /** Optional — when provided AND `issuesCount > 0` the bell button renders. */
+    onOpenIssues?: () => void;
     onOpenSettings: () => void;
     menuItems: MenuItem[];
   } = $props();
@@ -79,6 +86,18 @@
       <Icon name="refresh" size={16} />
       <span class="refresh-label">Refresh</span>
     </button>
+    {#if issuesCount > 0 && onOpenIssues}
+      <button
+        type="button"
+        class="icon-btn issues-btn"
+        aria-label="{issuesCount} active issue{issuesCount === 1 ? '' : 's'}"
+        data-testid="nav-issues"
+        onclick={onOpenIssues}
+      >
+        <Icon name="alert" size={18} />
+        <span class="issues-badge">{issuesCount > 9 ? "9+" : issuesCount}</span>
+      </button>
+    {/if}
     <button
       type="button"
       class="icon-btn"
@@ -216,6 +235,30 @@
   .icon-btn:hover {
     background: color-mix(in srgb, var(--md-color-on-surface) 8%, transparent);
     color: var(--md-color-on-surface);
+  }
+  .issues-btn {
+    position: relative;
+    color: var(--md-color-error);
+  }
+  .issues-btn:hover {
+    color: var(--md-color-error);
+    background: color-mix(in srgb, var(--md-color-error) 12%, transparent);
+  }
+  .issues-badge {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: 999px;
+    background: var(--md-color-error);
+    color: var(--md-color-on-error, white);
+    font-size: 0.62rem;
+    font-weight: 700;
+    line-height: 16px;
+    text-align: center;
+    box-sizing: border-box;
   }
 
   /* Wider viewports: identity + pills inline, actions on the right */
