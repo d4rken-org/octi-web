@@ -1,33 +1,13 @@
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { createPayloadEncryption } from "./payload";
+import {
+  INTEROP_LOCK,
+  loadInteropJson,
+  type InteropTinkVectors,
+} from "../__interop__/fixture-loader";
 
-interface FixtureVector {
-  name: string;
-  plaintextBase64: string;
-  ad: string;
-  ciphertextBase64: string;
-}
-
-interface FixtureKeysetBlock {
-  keysetType: string;
-  keysetBase64: string;
-  vectors: FixtureVector[];
-}
-
-interface Fixture {
-  generatedAt: string;
-  note: string;
-  gcmsiv: FixtureKeysetBlock;
-  siv: FixtureKeysetBlock;
-}
-
-const HERE = dirname(fileURLToPath(import.meta.url));
-const FIXTURE_PATH = resolve(HERE, "__fixtures__", "tink-vectors.json");
-const fixture = JSON.parse(readFileSync(FIXTURE_PATH, "utf-8")) as Fixture;
+const fixture = loadInteropJson<InteropTinkVectors>("tink-vectors.json");
 
 function base64ToBytes(b64: string): Uint8Array {
   return new Uint8Array(Buffer.from(b64, "base64"));
@@ -37,8 +17,11 @@ describe("payload — JVM↔TS golden vectors (AES-GCM-SIV)", () => {
   const keysetBytes = base64ToBytes(fixture.gcmsiv.keysetBase64);
 
   it("fixture metadata sanity", () => {
+    expect(fixture.schemaVersion).toBe(1);
     expect(fixture.gcmsiv.keysetType).toBe("AES256_GCM_SIV");
+    expect(fixture.siv.keysetType).toBe("AES256_SIV");
     expect(fixture.gcmsiv.vectors.length).toBeGreaterThanOrEqual(3);
+    expect(INTEROP_LOCK.source).toBe("d4rken-org/octi");
   });
 
   for (const v of fixture.gcmsiv.vectors) {
@@ -46,13 +29,17 @@ describe("payload — JVM↔TS golden vectors (AES-GCM-SIV)", () => {
       // The load-bearing check: a ciphertext produced by JVM PayloadEncryption +
       // gzip wrap must decrypt + gunzip back to the original plaintext under our
       // TS implementation. This fails noisily on any wire-format drift (Tink
-      // prefix layout, nonce position, AD encoding, gzip wrap).
+      // prefix layout, nonce position, AAD encoding, gzip wrap).
       const crypti = createPayloadEncryption(keysetBytes);
       const plaintext = base64ToBytes(v.plaintextBase64);
-      const ad = new TextEncoder().encode(v.ad);
+      const aad = new TextEncoder().encode(v.aad);
       const ciphertext = base64ToBytes(v.ciphertextBase64);
+      // App-main pins this: Tink AEAD wire prefix byte is 0x01. Bail early so
+      // a Tink upgrade that shifts the prefix is diagnosed up here, not as an
+      // opaque "decrypt failed".
+      expect(ciphertext[0]).toBe(0x01);
 
-      const decrypted = crypti.decrypt(ciphertext, ad);
+      const decrypted = crypti.decrypt(ciphertext, aad);
       expect(decrypted).toEqual(plaintext);
     });
   }
@@ -64,30 +51,30 @@ describe("payload — JVM↔TS golden vectors (AES-GCM-SIV)", () => {
       // changes to the local wire layout.
       const crypti = createPayloadEncryption(keysetBytes);
       const plaintext = base64ToBytes(v.plaintextBase64);
-      const ad = new TextEncoder().encode(v.ad);
+      const aad = new TextEncoder().encode(v.aad);
 
-      const ct = crypti.encrypt(plaintext, ad);
-      expect(crypti.decrypt(ct, ad)).toEqual(plaintext);
+      const ct = crypti.encrypt(plaintext, aad);
+      expect(crypti.decrypt(ct, aad)).toEqual(plaintext);
     });
   }
 
-  it("decrypt fails on wrong AD", () => {
+  it("decrypt fails on wrong AAD", () => {
     const crypti = createPayloadEncryption(keysetBytes);
-    const v = fixture.gcmsiv.vectors[1]!;
+    const v = fixture.gcmsiv.vectors.find((x) => x.plaintextBase64.length > 0)!;
     const ciphertext = base64ToBytes(v.ciphertextBase64);
-    const wrongAd = new TextEncoder().encode(`${v.ad}-tampered`);
-    expect(() => crypti.decrypt(ciphertext, wrongAd)).toThrow();
+    const wrongAad = new TextEncoder().encode(`${v.aad}-tampered`);
+    expect(() => crypti.decrypt(ciphertext, wrongAad)).toThrow();
   });
 
   it("decrypt fails on tampered ciphertext", () => {
     const crypti = createPayloadEncryption(keysetBytes);
-    const v = fixture.gcmsiv.vectors[1]!;
-    const ad = new TextEncoder().encode(v.ad);
+    const v = fixture.gcmsiv.vectors.find((x) => x.plaintextBase64.length > 0)!;
+    const aad = new TextEncoder().encode(v.aad);
     const tampered = base64ToBytes(v.ciphertextBase64);
     // Flip a bit in the body (skip the 5-byte Tink prefix to avoid hitting the
     // prefix-mismatch error path; we want the AEAD tag verification to be what fails).
     tampered[tampered.length - 1] ^= 0x01;
-    expect(() => crypti.decrypt(tampered, ad)).toThrow();
+    expect(() => crypti.decrypt(tampered, aad)).toThrow();
   });
 });
 

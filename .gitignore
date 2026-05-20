@@ -14,3 +14,8 @@ bootstrap-peer.json
 test-results/
 playwright-report/
 
+# Cross-repo wire-format fixtures fetched from d4rken-org/octi at the SHA
+# pinned in fixture-lock.json. Populated by `pnpm fixtures:sync` (and
+# vitest's globalSetup before tests). Never edit by hand.
+.cache/interop-fixtures/
+

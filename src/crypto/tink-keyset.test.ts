@@ -1,6 +1,3 @@
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -10,12 +7,9 @@ import {
   serializeTinkKeyset,
 } from "./tink-keyset";
 import { createPayloadEncryption } from "./payload";
+import { loadInteropJson, type InteropTinkVectors } from "../__interop__/fixture-loader";
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const FIXTURE_PATH = resolve(HERE, "__fixtures__", "tink-vectors.json");
-const fixture = JSON.parse(readFileSync(FIXTURE_PATH, "utf-8")) as {
-  gcmsiv: { keysetBase64: string };
-};
+const fixture = loadInteropJson<InteropTinkVectors>("tink-vectors.json");
 
 function base64ToBytes(b64: string): Uint8Array {
   return new Uint8Array(Buffer.from(b64, "base64"));
