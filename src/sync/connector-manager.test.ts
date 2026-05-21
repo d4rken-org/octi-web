@@ -12,6 +12,26 @@ vi.mock("../storage/identity-settings", () => ({
   __setOwnDeviceIdForTest: vi.fn(() => undefined),
 }));
 
+// Stub the crypto layer so tests that go through the REAL bootstrap path
+// (where `#syncConnectorsFromRecords` builds an OctiServerConnector and
+// instantiates per-connector crypto from `record.encryptionKeyset`) don't
+// need a valid Tink keyset. Tests that use `__setConnectorsForTest`
+// already bypass this code path via injected crypti, so the mock is
+// backwards-compatible.
+vi.mock("../crypto/payload", () => ({
+  createPayloadEncryption: vi.fn(() => ({
+    encrypt: (b: Uint8Array) => b,
+    decrypt: (b: Uint8Array) => b,
+  })),
+  buildAssociatedData: vi.fn(() => new Uint8Array(0)),
+}));
+vi.mock("../crypto/blob-cipher", () => ({
+  createBlobCipher: vi.fn(async () => ({
+    encrypt: async (b: Uint8Array) => b,
+    decrypt: async (b: Uint8Array) => b,
+  })),
+}));
+
 import { CLIPBOARD_MODULE_ID } from "../modules/clipboard";
 import type { SharedFile } from "../modules/files";
 import { META_MODULE_ID } from "../modules/meta";
@@ -1194,5 +1214,412 @@ describe("ConnectorManager file-share retry queue", () => {
 
     expect(maxInFlight).toBe(1);
     expect(await queue.list()).toEqual([]);
+  });
+});
+
+// ─── Persistent connector-state cache integration ───────────────
+//
+// The cache repo has its own roundtrip tests under
+// `connector-state-cache.test.ts`. Here we exercise the ConnectorManager's
+// bootstrap-seed / refresh-write / removeConnector-delete / wipe paths,
+// plus the deletion-generation guard against resurrection races.
+
+import {
+  type CachedConnectorState,
+  CURRENT_CACHE_VERSION,
+  ConnectorStateCache,
+} from "../storage/connector-state-cache";
+import { CLIPBOARD_MODULE_ID as CLIP_ID } from "../modules/clipboard";
+
+function freshStateCache(): ConnectorStateCache {
+  return new ConnectorStateCache();
+}
+
+describe("ConnectorManager connector-state cache", () => {
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await freshStateCache().wipeAll();
+    // Wipe credentials too — tests in this block seed credentialsRepo to
+    // drive the real `bootstrap()` path, and leftover records would build
+    // unexpected connectors in sibling tests.
+    const { credentialsRepo: credsRepo } = await import("../storage/credentials-repo");
+    await credsRepo.wipeAll();
+  });
+
+  it("bootstrap seeds perConnectorState from the cache when live state is empty", async () => {
+    // Real bootstrap path: seed both the credentials DB (so
+    // `#syncConnectorsSerialized` builds an OctiServerConnector for connA)
+    // AND the state cache, then call `manager.bootstrap()` and assert the
+    // resulting `perConnectorState`.
+    const cache = freshStateCache();
+    await cache.wipeAll();
+    // Wipe credentials first so this test's record is the only one.
+    const { credentialsRepo: credsRepo } = await import("../storage/credentials-repo");
+    await credsRepo.wipeAll();
+    await credsRepo.save({
+      connectorId: "kserver-test-acct",
+      connectorType: "kserver",
+      accountId: "acct",
+      devicePassword: "pwd",
+      ownDeviceId: "own-device",
+      deviceLabel: "Browser",
+      serverAddress: { domain: "test", protocol: "https", port: 443 },
+      encryptionKeyset: new Uint8Array([1]),
+      createdAt: 0,
+      updatedAt: 0,
+    });
+
+    const seed: CachedConnectorState = {
+      connectorId: "kserver-test-acct",
+      version: CURRENT_CACHE_VERSION,
+      lastError: null,
+      lastRefreshedAt: new Date("2026-05-21T09:00:00Z"),
+      lastSuccessAt: new Date("2026-05-21T09:00:00Z"),
+      devices: [
+        {
+          id: "dev-1",
+          raw: {
+            id: "dev-1",
+            label: "Phone",
+            platform: "android",
+            version: "v",
+            addedAt: null,
+            lastSeen: null,
+          } as unknown as DeviceMetadata,
+          modules: [
+            {
+              moduleId: CLIP_ID,
+              value: { type: "TEXT", data: new Uint8Array([0x68, 0x69]) },
+              modifiedAt: new Date("2026-05-21T08:55:00Z"),
+              error: null,
+            },
+          ],
+        },
+      ],
+    };
+    await cache.write(seed);
+
+    const manager = new ConnectorManager();
+    manager.__setConnectorStateCacheForTest(cache);
+
+    await manager.bootstrap();
+
+    // After bootstrap: connectors built from the seeded credential, AND
+    // perConnectorState seeded from the cache.
+    expect(manager.connectors.map((c) => c.connectorId)).toEqual([
+      "kserver-test-acct",
+    ]);
+    const live = manager.perConnectorState.get("kserver-test-acct");
+    expect(live).toBeDefined();
+    expect(live!.devices.size).toBe(1);
+    expect(live!.devices.get("dev-1")?.raw.label).toBe("Phone");
+    expect(live!.lastRefreshedAt?.toISOString()).toBe(seed.lastRefreshedAt!.toISOString());
+    // `refreshing` is intentionally false on cache deserialize (stale
+    // spinner state must not resurface across sessions).
+    expect(live!.refreshing).toBe(false);
+
+    await credsRepo.wipeAll(); // cleanup for sibling tests
+  });
+
+  it("bootstrap does NOT clobber live data with a stale cache snapshot", async () => {
+    // After a refresh has populated `perConnectorState[connA]`, calling
+    // `bootstrap()` again (which happens on rename / addConnector) must
+    // skip seeding because the live state already has devices.
+    const cache = freshStateCache();
+    await cache.wipeAll();
+    const { credentialsRepo: credsRepo } = await import("../storage/credentials-repo");
+    await credsRepo.wipeAll();
+    await credsRepo.save({
+      connectorId: "kserver-test-acct",
+      connectorType: "kserver",
+      accountId: "acct",
+      devicePassword: "pwd",
+      ownDeviceId: "own-device",
+      deviceLabel: "Browser",
+      serverAddress: { domain: "test", protocol: "https", port: 443 },
+      encryptionKeyset: new Uint8Array([1]),
+      createdAt: 0,
+      updatedAt: 0,
+    });
+    // Cache contains "STALE-PEER".
+    await cache.write({
+      connectorId: "kserver-test-acct",
+      version: CURRENT_CACHE_VERSION,
+      lastError: null,
+      lastRefreshedAt: new Date(0),
+      lastSuccessAt: new Date(0),
+      devices: [
+        {
+          id: "stale-peer",
+          raw: {
+            id: "stale-peer",
+            label: "STALE",
+            platform: "android",
+            version: "v",
+            addedAt: null,
+            lastSeen: null,
+          } as unknown as DeviceMetadata,
+          modules: [],
+        },
+      ],
+    });
+
+    const manager = new ConnectorManager();
+    manager.__setConnectorStateCacheForTest(cache);
+    await manager.bootstrap();
+
+    // Simulate a refresh having landed: replace live state with a fresh
+    // peer record.
+    manager.perConnectorState = new Map([
+      [
+        "kserver-test-acct",
+        {
+          devices: new Map([
+            [
+              "fresh-peer",
+              {
+                raw: {
+                  id: "fresh-peer",
+                  label: "FRESH",
+                  platform: "android",
+                  version: "v",
+                  addedAt: null,
+                  lastSeen: null,
+                } as unknown as DeviceMetadata,
+                modules: new Map(),
+              },
+            ],
+          ]),
+          lastError: null,
+          lastRefreshedAt: new Date(),
+          lastSuccessAt: new Date(),
+          refreshing: false,
+        },
+      ],
+    ]);
+
+    // Second bootstrap (rename / addConnector triggers this) must NOT
+    // clobber the live FRESH peer with the cached STALE one.
+    await manager.bootstrap();
+
+    const live = manager.perConnectorState.get("kserver-test-acct");
+    expect(live!.devices.has("fresh-peer")).toBe(true);
+    expect(live!.devices.has("stale-peer")).toBe(false);
+
+    await credsRepo.wipeAll();
+  });
+
+  it("removeConnector deletes the cache row", async () => {
+    const cache = freshStateCache();
+    await cache.wipeAll();
+    await cache.write({
+      connectorId: "connA",
+      version: CURRENT_CACHE_VERSION,
+      lastError: null,
+      lastRefreshedAt: new Date(),
+      lastSuccessAt: new Date(),
+      devices: [],
+    });
+    expect(await cache.read("connA")).not.toBeNull();
+
+    const cA = makeMockConnector("connA");
+    const manager = new ConnectorManager();
+    manager.__setConnectorsForTest({
+      connectors: [cA],
+      crypti: new Map([["connA", makeStubCrypti()]]),
+    });
+    manager.__setConnectorStateCacheForTest(cache);
+    manager.perConnectorState = new Map([["connA", idleState()]]);
+
+    await manager.removeConnector("connA");
+
+    expect(await cache.read("connA")).toBeNull();
+  });
+
+  it("manager.signOut bumps every connector's gen BEFORE wiping; in-flight cache writes are skipped", async () => {
+    // Drive a refresh that suspends inside the cache's `writeIfCurrent`
+    // predicate. While suspended, call `manager.signOut()` (which bumps
+    // every #cacheWriteGen). When the predicate is finally evaluated, it
+    // sees the bumped gen and returns false — `db.put` is NOT called.
+    const writes: CachedConnectorState[] = [];
+    const stubCache = {
+      read: vi.fn(async () => null),
+      write: vi.fn(async (entry: CachedConnectorState) => {
+        writes.push(entry);
+      }),
+      writeIfCurrent: vi.fn(
+        async (entry: CachedConnectorState, stillCurrent: () => boolean) => {
+          // Yield first so the test can call signOut between the
+          // schedule and the predicate evaluation.
+          await new Promise((r) => setTimeout(r, 10));
+          if (!stillCurrent()) return false;
+          writes.push(entry);
+          return true;
+        },
+      ),
+      delete: vi.fn(async () => undefined),
+      wipeAll: vi.fn(async () => undefined),
+    } as unknown as ConnectorStateCache;
+
+    const cA = makeMockConnector("connA", {
+      listDevices: vi.fn(async () => [
+        {
+          id: "dev-1",
+          label: "Phone",
+          platform: "android",
+          version: "v",
+          addedAt: null,
+          lastSeen: null,
+        } as unknown as DeviceMetadata,
+      ]),
+    });
+    const manager = new ConnectorManager();
+    manager.__setConnectorsForTest({
+      connectors: [cA],
+      crypti: new Map([["connA", makeStubCrypti()]]),
+    });
+    manager.__setConnectorStateCacheForTest(stubCache);
+    manager.perConnectorState = new Map([["connA", idleState()]]);
+
+    // Kick off the refresh (synchronously schedules a #writeCacheGuarded
+    // call after listDevices resolves).
+    const refreshPromise = manager.refreshAll();
+    // Let the refresh complete its state-update + schedule the cache
+    // write. The cache write is suspended inside writeIfCurrent's 10ms
+    // gate. signOut bumps generations during that gap.
+    await refreshPromise;
+    expect(stubCache.writeIfCurrent).toHaveBeenCalledTimes(1);
+
+    // Race signOut against the pending writeIfCurrent gate.
+    await manager.signOut();
+    // Yield until the gated write resolves; predicate must have returned
+    // false, so nothing landed in `writes`.
+    await new Promise((r) => setTimeout(r, 30));
+    expect(writes).toHaveLength(0);
+    // signOut also wipes IDB via wipeLocalSyncData (mocked via the stub's
+    // wipeAll) — but wipeLocalSyncData wipes the singleton, not our stub,
+    // so don't assert on stubCache.wipeAll. Instead assert that the
+    // manager's in-memory state was cleared.
+    expect(manager.connectors).toEqual([]);
+    expect(manager.perConnectorState.size).toBe(0);
+  });
+
+  it("successful refresh writes the cache; reading it back is structurally identical", async () => {
+    const cache = freshStateCache();
+    await cache.wipeAll();
+    const cA = makeMockConnector("connA", {
+      listDevices: vi.fn(async () => [
+        {
+          id: "dev-1",
+          label: "Phone",
+          platform: "android",
+          version: "v",
+          addedAt: null,
+          lastSeen: null,
+        } as unknown as DeviceMetadata,
+      ]),
+    });
+    const manager = new ConnectorManager();
+    manager.__setConnectorsForTest({
+      connectors: [cA],
+      crypti: new Map([["connA", makeStubCrypti()]]),
+    });
+    manager.__setConnectorStateCacheForTest(cache);
+    manager.perConnectorState = new Map([["connA", idleState()]]);
+
+    await manager.refreshAll();
+
+    // Cache write is fire-and-forget — yield to let the IDB put settle.
+    await new Promise((r) => setTimeout(r, 20));
+
+    const written = await cache.read("connA");
+    expect(written).not.toBeNull();
+    expect(written!.connectorId).toBe("connA");
+    expect(written!.version).toBe(CURRENT_CACHE_VERSION);
+    expect(written!.devices).toHaveLength(1);
+    expect(written!.devices[0].id).toBe("dev-1");
+  });
+
+  it("removeConnector deletes the cache row", async () => {
+    const cache = freshStateCache();
+    await cache.wipeAll();
+    await cache.write({
+      connectorId: "connA",
+      version: CURRENT_CACHE_VERSION,
+      lastError: null,
+      lastRefreshedAt: new Date(),
+      lastSuccessAt: new Date(),
+      devices: [],
+    });
+    expect(await cache.read("connA")).not.toBeNull();
+
+    const cA = makeMockConnector("connA");
+    const manager = new ConnectorManager();
+    manager.__setConnectorsForTest({
+      connectors: [cA],
+      crypti: new Map([["connA", makeStubCrypti()]]),
+    });
+    manager.__setConnectorStateCacheForTest(cache);
+    manager.perConnectorState = new Map([["connA", idleState()]]);
+
+    await manager.removeConnector("connA");
+
+    expect(await cache.read("connA")).toBeNull();
+  });
+
+  it("removeConnector during a pending cache write: writeIfCurrent predicate returns false and no put lands", async () => {
+    // The publish-gate-style stub lets us race a `removeConnector` against
+    // a pending `writeIfCurrent`. The predicate evaluates AFTER signOut's
+    // gen bump, so the put is skipped.
+    const writes: CachedConnectorState[] = [];
+    const stubCache = {
+      read: vi.fn(async () => null),
+      write: vi.fn(async () => undefined),
+      writeIfCurrent: vi.fn(
+        async (entry: CachedConnectorState, stillCurrent: () => boolean) => {
+          // Suspend long enough for the test to invoke removeConnector.
+          await new Promise((r) => setTimeout(r, 10));
+          if (!stillCurrent()) return false;
+          writes.push(entry);
+          return true;
+        },
+      ),
+      delete: vi.fn(async () => undefined),
+      wipeAll: vi.fn(async () => undefined),
+    } as unknown as ConnectorStateCache;
+
+    const cA = makeMockConnector("connA", {
+      listDevices: vi.fn(async () => [
+        {
+          id: "dev-1",
+          label: "Phone",
+          platform: "android",
+          version: "v",
+          addedAt: null,
+          lastSeen: null,
+        } as unknown as DeviceMetadata,
+      ]),
+    });
+    const manager = new ConnectorManager();
+    manager.__setConnectorsForTest({
+      connectors: [cA],
+      crypti: new Map([["connA", makeStubCrypti()]]),
+    });
+    manager.__setConnectorStateCacheForTest(stubCache);
+    manager.perConnectorState = new Map([["connA", idleState()]]);
+
+    // refreshAll schedules a writeIfCurrent that suspends in the gate.
+    await manager.refreshAll();
+    expect(stubCache.writeIfCurrent).toHaveBeenCalledTimes(1);
+
+    // Race removeConnector against the suspended writeIfCurrent.
+    // removeConnector bumps cacheWriteGen via #invalidateConnectorRefresh.
+    await manager.removeConnector("connA");
+    expect(stubCache.delete).toHaveBeenCalledWith("connA");
+
+    // Let the suspended writeIfCurrent's predicate fire. Generation has
+    // moved → predicate false → no put lands.
+    await new Promise((r) => setTimeout(r, 30));
+    expect(writes).toHaveLength(0);
   });
 });

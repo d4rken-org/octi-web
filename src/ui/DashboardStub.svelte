@@ -8,7 +8,6 @@
   import { startPollLoop } from "../sync/poll-loop";
   import { credentialsRepo, type CredentialRecord } from "../storage/credentials-repo";
   import { tileLayoutRepo } from "../storage/tile-layout-repo";
-  import { wipeLocalSyncData } from "../storage/wipe-all";
   import { OCTI_WEB_DISPLAY_VERSION } from "../version";
   import DeviceCard from "./dashboard/DeviceCard.svelte";
   import IssuesSummarySheet from "./dashboard/IssuesSummarySheet.svelte";
@@ -185,17 +184,19 @@
     ) {
       return;
     }
-    // `wipeLocalSyncData` is the single source of truth for what gets
-    // cleared on sign-out (credentials, tile layouts, pending file-share
-    // retries — see {@link wipeLocalSyncData}). Keeping the list in one
-    // place prevents future PRs adding new stores from accidentally
-    // omitting them here.
+    // Route through `manager.signOut()` so every per-connector
+    // generation gets bumped BEFORE the IDB wipe. Without that, an
+    // in-flight `refreshAll` finishing after the wipe could re-create
+    // cache rows we just deleted — and since `connectorId` is stable for
+    // a given server/account, a future re-link would seed pre-sign-out
+    // data back into the dashboard. The manager wipes all sync stores
+    // via {@link wipeLocalSyncData} as its last step.
     //
     // IdentitySettings is intentionally NOT wiped — matching Android's
     // `SyncSettings.deviceId`, which persists across `removeAll`. Otherwise
     // re-linking creates another "device" identity on the server, leaving
     // stale records behind.
-    await wipeLocalSyncData();
+    await manager.signOut();
     onSignOut();
   }
 

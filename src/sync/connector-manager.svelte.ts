@@ -37,10 +37,17 @@ import { sha256Hex } from "../protocol/blob-session";
 import { OctiServerConnector } from "../protocol/octi-server-connector";
 import type { DeviceMetadata } from "../protocol/models";
 import {
+  type CachedConnectorState,
+  CURRENT_CACHE_VERSION as CACHE_CURRENT_VERSION,
+  type ConnectorStateCache,
+  connectorStateCache,
+} from "../storage/connector-state-cache";
+import {
   type CredentialRecord,
   credentialsRepo,
 } from "../storage/credentials-repo";
 import { getOwnDeviceId } from "../storage/identity-settings";
+import { wipeLocalSyncData } from "../storage/wipe-all";
 import {
   fileShareRetryQueue,
   MAX_ATTEMPTS as RETRY_MAX_ATTEMPTS,
@@ -150,6 +157,30 @@ export class ConnectorManager {
    * row updates. Overlapping drains coalesce into one.
    */
   #drainInFlight: Promise<void> | null = null;
+  /**
+   * Persistent fallback for {@link perConnectorState}. Read on bootstrap so
+   * the dashboard renders last-known data instantly on tab reload; written
+   * (fire-and-forget) after every successful per-connector refresh. Tests
+   * inject a fresh instance via {@link __setConnectorStateCacheForTest}.
+   */
+  #connectorStateCache: ConnectorStateCache = connectorStateCache;
+  /**
+   * Per-connector deletion generation. Bumped synchronously by
+   * {@link removeConnector} (via {@link #invalidateConnectorRefresh}) and
+   * by sign-out. A fire-and-forget cache write that was scheduled before
+   * the bump checks the generation just before its `put` and skips if the
+   * generation moved. Prevents a late refresh write from resurrecting a
+   * cache row that {@link removeConnector} just deleted.
+   *
+   * Note: the gen check narrows the resurrection race window to microseconds
+   * between the check and `db.put` queueing — IDB then serializes the put
+   * and any subsequent delete in transaction-arrival order, so a stale put
+   * can still in theory beat a delete to commit. The remaining residual
+   * race is harmless: a stale cache row for a connector not in
+   * `this.connectors` is inert (bootstrap doesn't iterate over it) and the
+   * next sign-out's `wipeAll` cleans up.
+   */
+  #cacheWriteGen = new Map<string, number>();
 
   // ─── Generation guards ───────────────────────────────────────
   #refreshSeq = 0;
@@ -175,12 +206,20 @@ export class ConnectorManager {
   // ─── Bootstrap ───────────────────────────────────────────────
   /**
    * Initialize from persistent storage. Reads all credentials, builds a
-   * connector + crypti + blobCipher for each, but does NOT trigger refresh
-   * (caller composes that with the poll-loop). Safe to call repeatedly;
-   * connectors whose credentials are gone get torn down.
+   * connector + crypti + blobCipher for each, then seeds `perConnectorState`
+   * from the on-disk cache so the dashboard renders last-known data
+   * immediately on tab reload (the first {@link refreshAll} then overwrites
+   * with fresh data in the background).
+   *
+   * Safe to call repeatedly; connectors whose credentials are gone get torn
+   * down. The cache-seed step intentionally only fills in connectors with
+   * empty `perConnectorState` — calling `bootstrap()` after an `addConnector`
+   * or label-rename must NOT clobber the just-fetched live data with a
+   * stale cache snapshot.
    */
   async bootstrap(): Promise<void> {
     await this.#syncConnectorsSerialized();
+    await this.#seedFromCache();
   }
 
   /**
@@ -197,6 +236,55 @@ export class ConnectorManager {
   }
 
   /**
+   * Sign-out: tear down every in-memory connector slot AND wipe local
+   * persistence in one step. Sign-out used to inline `wipeLocalSyncData()`
+   * directly from `DashboardStub`, but that left a window where an
+   * in-flight `refreshAll` could finish AFTER the wipe and re-create the
+   * cache row it just deleted (`connectorId` is stable for the same
+   * server/account, so a future re-link could then seed pre-sign-out
+   * data). Routing through the manager bumps every per-connector
+   * generation BEFORE the wipe, invalidating those in-flight writes.
+   *
+   * Order matters:
+   *   1. Bump every connector's `#refreshSeq` / `#refreshOneToken` /
+   *      `#cacheWriteGen` so already-in-flight refresh writes and cache
+   *      writes return "stale" or skip their `put`.
+   *   2. Bump the GLOBAL `#refreshSeq` so any `refreshAll()` in flight
+   *      stops looking authoritative.
+   *   3. Clear in-memory state + crypto runtimes so the dashboard's
+   *      reactive views snap to empty immediately.
+   *   4. Call `wipeLocalSyncData()` to drop the IDB databases.
+   *
+   * Caller (DashboardStub) follows up with the route flip back to
+   * Onboarding via the `onSignOut` callback.
+   */
+  async signOut(): Promise<void> {
+    // Step 1: per-connector gen bumps. Iterate `connectors` AND
+    // `perConnectorState` keys — a connector may exist in one but not
+    // the other if a teardown was in flight.
+    const idsToInvalidate = new Set<string>([
+      ...this.connectors.map((c) => c.connectorId),
+      ...this.perConnectorState.keys(),
+    ]);
+    for (const id of idsToInvalidate) {
+      this.#invalidateConnectorRefresh(id);
+    }
+    // Step 2: global refresh seq so a `refreshAll` currently fanning out
+    // returns early instead of writing per-connector results.
+    this.#refreshSeq++;
+    // Step 3: clear runtime state. The order doesn't matter — they're all
+    // private. Replace `perConnectorState` reference for Svelte reactivity.
+    this.connectors = [];
+    this.perConnectorState = new Map();
+    this.#crypti.clear();
+    this.#blobCipher.clear();
+    this.#etagCache.clear();
+    this.#publishLocks.clear();
+    // Step 4: persistent wipe.
+    await wipeLocalSyncData();
+  }
+
+  /**
    * Remove one connector. Invalidates any in-flight refresh for that slot,
    * deletes its credential record, drops per-connector state and caches.
    * Other connectors keep working.
@@ -208,12 +296,15 @@ export class ConnectorManager {
     this.#crypti.delete(connectorId);
     this.#blobCipher.delete(connectorId);
     this.#etagCache.delete(connectorId);
-    // Prune the retry queue. Pending entries referencing only this
-    // connector are dropped; entries with other targets keep going. We
-    // swallow errors so a failed prune doesn't block the removal — the
-    // queue is best-effort and a stale connectorId there is harmless
-    // (drain will look it up in `this.connectors`, miss, and move on).
-    await this.#retryQueue.pruneConnector(connectorId).catch(() => undefined);
+    // Drop persistent data for this connector. Errors are swallowed so a
+    // failed prune/delete doesn't block the removal — the retry queue and
+    // state cache are best-effort. Stale rows are inert (bootstrap only
+    // seeds connectors that are still in credentials), and the next
+    // sign-out's `wipeLocalSyncData()` cleans them up regardless.
+    await Promise.all([
+      this.#retryQueue.pruneConnector(connectorId).catch(() => undefined),
+      this.#connectorStateCache.delete(connectorId).catch(() => undefined),
+    ]);
     await credentialsRepo.deleteByConnectorId(connectorId);
     await this.#syncConnectorsSerialized();
   }
@@ -344,14 +435,16 @@ export class ConnectorManager {
   /**
    * Invalidate every in-flight refresh signal for one connector — used on
    * teardown (`removeConnector`, `#syncConnectorsFromRecords` when a
-   * credential is gone). Bumps both:
+   * credential is gone). Bumps three counters:
    *   - `#connectorSeq` so any in-flight `#refreshOne` writes are discarded.
    *   - `#refreshOneToken` so any late completion's spinner clear is a no-op
    *     even if the connector's row is later re-created (defensive — the
    *     `#updateState` no-op on missing slot would catch it anyway).
+   *   - `#cacheWriteGen` so a fire-and-forget cache write scheduled before
+   *     the bump checks the new generation and skips.
    *
-   * Centralised so the two teardown paths stay in sync; an earlier draft
-   * bumped only one and that was the kind of drift that becomes a bug later.
+   * Centralised so the teardown paths stay in sync; an earlier draft bumped
+   * only one and that was the kind of drift that becomes a bug later.
    */
   #invalidateConnectorRefresh(connectorId: string): void {
     this.#bumpConnectorSeq(connectorId);
@@ -359,6 +452,82 @@ export class ConnectorManager {
       connectorId,
       (this.#refreshOneToken.get(connectorId) ?? 0) + 1,
     );
+    this.#cacheWriteGen.set(
+      connectorId,
+      (this.#cacheWriteGen.get(connectorId) ?? 0) + 1,
+    );
+  }
+
+  // ─── Persistent connector-state cache ───────────────────────
+  /**
+   * Read the on-disk cache for every active connector and seed
+   * `perConnectorState`. Iterates `this.connectors` in array order (which
+   * is already `(createdAt asc, connectorId asc)` from
+   * `#syncConnectorsFromRecords`) so the Map's insertion order matches —
+   * the metadata-owner tiebreak in {@link mergeDevices} depends on this.
+   *
+   * Only seeds connectors whose live state is still empty
+   * ({@code devices.size === 0}). Calling `bootstrap()` after an
+   * `addConnector` or label rename must NOT clobber live data with a stale
+   * cache snapshot.
+   */
+  async #seedFromCache(): Promise<void> {
+    for (const connector of this.connectors) {
+      const id = connector.connectorId;
+      // Capture the BEFORE-await state so we can detect mid-await changes.
+      // Two races can interleave with the `await cache.read(id)`:
+      //   1. A refresh completes and writes fresh `perConnectorState[id]`.
+      //      The stale cache must NOT clobber it — assert the slot is
+      //      still the same empty `live` reference on return.
+      //   2. `removeConnector(id)` runs, deleting the slot entirely (and
+      //      bumping every generation counter). The connector is gone
+      //      from `this.connectors` and the slot is missing from
+      //      `perConnectorState`. We must NOT resurrect either.
+      const liveBefore = this.perConnectorState.get(id);
+      if (!liveBefore || liveBefore.devices.size > 0) continue;
+      const cached = await this.#connectorStateCache.read(id).catch((e) => {
+        console.warn("[ConnectorManager] cache read failed", id, e);
+        return null;
+      });
+      if (!cached) continue;
+      // Post-await guards. Identity comparison (`liveNow !== liveBefore`)
+      // catches a refresh that replaced the slot; the explicit connectors
+      // check catches a remove that emptied the list.
+      const liveNow = this.perConnectorState.get(id);
+      if (liveNow !== liveBefore) continue;
+      if (!this.connectors.some((c) => c.connectorId === id)) continue;
+      this.perConnectorState.set(id, deserializeFromCache(cached));
+    }
+    // Single reactivity bump after seeding all connectors — avoids one
+    // Svelte invalidation per connector during bootstrap.
+    this.perConnectorState = new Map(this.perConnectorState);
+  }
+
+  /**
+   * Fire-and-forget cache write after a successful per-connector refresh.
+   * Errors (quota, transient IDB failure) are logged + swallowed: the
+   * cache is best-effort and a miss just means the next bootstrap shows
+   * the empty grid for a few hundred ms before the first refresh fills it.
+   *
+   * The deletion-generation guard before the put narrows the
+   * remove-then-resurrect race window to microseconds (see the docstring
+   * on {@link #cacheWriteGen}).
+   */
+  #writeCacheGuarded(connectorId: string, state: ConnectorRefreshState): void {
+    const myGen = this.#cacheWriteGen.get(connectorId) ?? 0;
+    const entry = serializeToCache(connectorId, state);
+    // `writeIfCurrent` evaluates the predicate AFTER `getDb()` resolves,
+    // right before queuing the put. Pushing the gen check down past the
+    // DB-open async gap shrinks the residual race window vs. checking the
+    // gen here in the caller. See {@link ConnectorStateCache.writeIfCurrent}.
+    void this.#connectorStateCache
+      .writeIfCurrent(
+        entry,
+        () => (this.#cacheWriteGen.get(connectorId) ?? 0) === myGen,
+      )
+      .catch((e) => {
+        console.warn("[ConnectorManager] cache write failed", connectorId, e);
+      });
   }
 
   /** Increment the refresh refcount; flip {@link loading} on the rising edge. */
@@ -538,6 +707,11 @@ export class ConnectorManager {
         // pass left `refreshing=true` and bumped the token; leave it.
         refreshing: this.#refreshOneToken.get(connectorId) !== myToken,
       }));
+      // Persist for next session's bootstrap. Fire-and-forget — the IDB
+      // write doesn't gate the next refresh tick. See
+      // {@link #writeCacheGuarded} for the deletion-race guard.
+      const fresh = this.perConnectorState.get(connectorId);
+      if (fresh) this.#writeCacheGuarded(connectorId, fresh);
       return "ok";
     } catch (e) {
       if (isStale()) return "stale";
@@ -1018,6 +1192,71 @@ export class ConnectorManager {
   __setRetryQueueForTest(q: FileShareRetryQueue): void {
     this.#retryQueue = q;
   }
+
+  /**
+   * Swap the connector-state cache. Same rationale as
+   * {@link __setRetryQueueForTest} — lets the tests use a fresh instance
+   * so cross-test state on the module-level singleton doesn't leak.
+   */
+  __setConnectorStateCacheForTest(c: ConnectorStateCache): void {
+    this.#connectorStateCache = c;
+  }
+}
+
+// ─── Cache (de)serialization ────────────────────────────────────
+/**
+ * Convert the live {@link ConnectorRefreshState} (Maps) into the storage
+ * shape (arrays). Maps would structured-clone fine too, but arrays are
+ * easier for the cache's defensive shape validator to check on read.
+ *
+ * The `refreshing` field is intentionally NOT persisted — a spinner that
+ * was true at the moment of process exit must not come back true on the
+ * next session.
+ */
+function serializeToCache(
+  connectorId: string,
+  state: ConnectorRefreshState,
+): CachedConnectorState {
+  return {
+    connectorId,
+    version: CACHE_CURRENT_VERSION,
+    lastError: state.lastError,
+    lastRefreshedAt: state.lastRefreshedAt,
+    lastSuccessAt: state.lastSuccessAt,
+    devices: Array.from(state.devices.values()).map((d) => ({
+      id: d.raw.id,
+      raw: d.raw,
+      modules: Array.from(d.modules.entries()).map(([moduleId, m]) => ({
+        moduleId,
+        value: m.value,
+        modifiedAt: m.modifiedAt,
+        error: m.error,
+      })),
+    })),
+  };
+}
+
+/** Inverse of {@link serializeToCache}. */
+function deserializeFromCache(cached: CachedConnectorState): ConnectorRefreshState {
+  const devices = new Map<string, DeviceConnectorState>();
+  for (const d of cached.devices) {
+    const modules = new Map<string, ModuleEntry>();
+    for (const m of d.modules) {
+      modules.set(m.moduleId, {
+        value: m.value,
+        modifiedAt: m.modifiedAt,
+        error: m.error,
+      });
+    }
+    devices.set(d.id, { raw: d.raw, modules });
+  }
+  return {
+    devices,
+    lastError: cached.lastError,
+    lastRefreshedAt: cached.lastRefreshedAt,
+    lastSuccessAt: cached.lastSuccessAt,
+    refreshing: false,
+  };
 }
 
 // ─── Module fetcher table ───────────────────────────────────────
