@@ -1,6 +1,19 @@
+// Node env (default) — jsdom's File polyfill lacks .arrayBuffer(), but
+// node 20+ has the native File which does. We still need fake-indexeddb
+// for the retry-queue and credentials-repo paths (both fine in node);
+// `IdentitySettings.getOwnDeviceId` touches localStorage, so we mock the
+// module here.
+import "fake-indexeddb/auto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("../storage/identity-settings", () => ({
+  getOwnDeviceId: vi.fn(async () => "own-device-test"),
+  wipeOwnDeviceId: vi.fn(() => undefined),
+  __setOwnDeviceIdForTest: vi.fn(() => undefined),
+}));
+
 import { CLIPBOARD_MODULE_ID } from "../modules/clipboard";
+import type { SharedFile } from "../modules/files";
 import { META_MODULE_ID } from "../modules/meta";
 import { POWER_MODULE_ID } from "../modules/power";
 import type { PayloadEncryption } from "../crypto/payload";
@@ -12,6 +25,23 @@ import {
   type DeviceConnectorState,
   mergeDevices,
 } from "./connector-manager.svelte";
+import { FileShareRetryQueue } from "./fileshare-retry-queue";
+
+/**
+ * Build a fresh retry-queue instance for tests. We can't avoid sharing the
+ * IDB database name with the module-level singleton (it's a module-level
+ * constant), so each test that uses the queue also wipes before / after.
+ */
+function freshRetryQueue(): FileShareRetryQueue {
+  return new FileShareRetryQueue();
+}
+
+function makeIdBlobCipher(): import("../crypto/blob-cipher").BlobCipher {
+  return {
+    encrypt: async (b: Uint8Array) => b,
+    decrypt: async (b: Uint8Array) => b,
+  } as unknown as import("../crypto/blob-cipher").BlobCipher;
+}
 
 /**
  * Pure merge-engine tests. They drive {@link mergeDevices} directly without
@@ -779,5 +809,390 @@ describe("ConnectorManager.refreshOne", () => {
     manager.__setConnectorsForTest({ connectors: [], crypti: new Map() });
     // Should not throw, should not write anywhere.
     await expect(manager.refreshOne("connA")).resolves.toBeUndefined();
+  });
+});
+
+describe("ConnectorManager file-share retry queue", () => {
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    // Wipe the (shared) singleton DB so cross-test state doesn't leak.
+    await freshRetryQueue().wipeAll();
+  });
+
+  it("uploadFile enqueues phase-2 failures with the failing connectorIds", async () => {
+    // connA: phase-1 OK, phase-2 fails. connB: phase-1 OK, phase-2 OK.
+    // After uploadFile, the queue should hold one entry with connA only.
+    const commitA = vi.fn(async () => {
+      throw new Error("412 precondition");
+    });
+    const commitB = vi.fn(async () => ({ etag: "eB" }));
+    const cA = makeMockConnector("connA", {
+      uploadBlobBytes: vi.fn(async () => "blob-A"),
+      commitModule: commitA,
+    });
+    const cB = makeMockConnector("connB", {
+      uploadBlobBytes: vi.fn(async () => "blob-B"),
+      commitModule: commitB,
+    });
+
+    const queue = freshRetryQueue();
+    await queue.wipeAll();
+    const manager = new ConnectorManager();
+    manager.__setConnectorsForTest({
+      connectors: [cA, cB],
+      crypti: new Map([
+        ["connA", makeStubCrypti()],
+        ["connB", makeStubCrypti()],
+      ]),
+      blobCipher: new Map([
+        ["connA", makeIdBlobCipher()],
+        ["connB", makeIdBlobCipher()],
+      ]),
+    });
+    manager.__setRetryQueueForTest(queue);
+    manager.perConnectorState = new Map([
+      ["connA", idleState()],
+      ["connB", idleState()],
+    ]);
+
+    const file = new File([new Uint8Array([1])], "z.bin", { type: "application/octet-stream" });
+    const result = await manager.uploadFile(file);
+    // Upload should succeed (B accepted).
+    expect(result.shared.availableOn.sort()).toEqual(["connA", "connB"]);
+
+    const pending = await queue.list();
+    expect(pending).toHaveLength(1);
+    expect(pending[0].pendingConnectorIds).toEqual(["connA"]);
+    expect(pending[0].shared.blobKey).toBe(result.shared.blobKey);
+    expect(pending[0].attempts).toBe(0);
+  });
+
+  it("uploadFile does NOT enqueue a connector that disconnected between phase 1 and phase 2", async () => {
+    // Phase 1 takes a snapshot of `this.connectors`, uploads blobs in
+    // parallel. Phase 2 looks up each connector LIVE via
+    // `this.connectors.find(...)`. If the user disconnected a connector
+    // in between, phase 2 sees `undefined` and must skip without
+    // enqueueing — re-adding the connector later wouldn't auto-publish
+    // the queued entry, so retrying is pointless.
+    //
+    // We trigger the race by mutating `manager.connectors` from inside
+    // `cA.uploadBlobBytes` (runs in phase 1). By the time phase 2
+    // iterates `uploads`, A is gone from `this.connectors`.
+    const manager = new ConnectorManager();
+    const cA = makeMockConnector("connA", {
+      uploadBlobBytes: vi.fn(async () => {
+        // Mutate during phase 1 (after the upload "succeeded" but before
+        // phase 2 looks the connector up).
+        manager.connectors = manager.connectors.filter(
+          (c) => c.connectorId !== "connA",
+        );
+        return "blob-A";
+      }),
+    });
+    const cB = makeMockConnector("connB", {
+      uploadBlobBytes: vi.fn(async () => "blob-B"),
+      commitModule: vi.fn(async () => ({ etag: "eB" })),
+    });
+
+    const queue = freshRetryQueue();
+    await queue.wipeAll();
+    manager.__setConnectorsForTest({
+      connectors: [cA, cB],
+      crypti: new Map([
+        ["connA", makeStubCrypti()],
+        ["connB", makeStubCrypti()],
+      ]),
+      blobCipher: new Map([
+        ["connA", makeIdBlobCipher()],
+        ["connB", makeIdBlobCipher()],
+      ]),
+    });
+    manager.__setRetryQueueForTest(queue);
+    manager.perConnectorState = new Map([
+      ["connA", idleState()],
+      ["connB", idleState()],
+    ]);
+
+    const file = new File([new Uint8Array([1])], "race.bin", { type: "application/octet-stream" });
+    await manager.uploadFile(file);
+
+    // Queue must NOT contain connA — it disconnected mid-upload.
+    const pending = await queue.list();
+    expect(pending).toEqual([]);
+  });
+
+  it("refreshAll drains the queue: successful publish removes the entry", async () => {
+    const queue = freshRetryQueue();
+    await queue.wipeAll();
+
+    // Seed the queue directly with a pending entry for connA.
+    const shared = {
+      name: "seeded.bin",
+      mimeType: "application/octet-stream",
+      size: 1,
+      blobKey: "sha256:seeded",
+      checksum: "seeded",
+      sharedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      availableOn: ["connA"],
+      connectorRefs: { connA: "blob-A" },
+    };
+    await queue.enqueue({ shared, pendingConnectorIds: ["connA"] });
+
+    // connA's `commitModule` will succeed on drain.
+    const commitA = vi.fn(async () => ({ etag: "eA" }));
+    const cA = makeMockConnector("connA", { commitModule: commitA });
+
+    const manager = new ConnectorManager();
+    manager.__setConnectorsForTest({
+      connectors: [cA],
+      crypti: new Map([["connA", makeStubCrypti()]]),
+    });
+    manager.__setRetryQueueForTest(queue);
+    manager.perConnectorState = new Map([["connA", idleState()]]);
+
+    await manager.refreshAll();
+
+    expect(commitA).toHaveBeenCalled();
+    expect(await queue.list()).toEqual([]);
+  });
+
+  it("refreshAll drain: persistent failure increments attempts; cap drops the entry and emits an issue", async () => {
+    const queue = freshRetryQueue();
+    await queue.wipeAll();
+
+    // Seed with attempts = MAX-1 so a single drain pass crosses the threshold.
+    const shared = {
+      name: "max.bin",
+      mimeType: "application/octet-stream",
+      size: 1,
+      blobKey: "sha256:max",
+      checksum: "max",
+      sharedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      availableOn: ["connA"],
+      connectorRefs: { connA: "blob-A" },
+    };
+    const { entry } = await queue.enqueue({ shared, pendingConnectorIds: ["connA"] });
+    await queue.update({ ...entry, attempts: 4 }); // MAX_ATTEMPTS - 1
+
+    const commitA = vi.fn(async () => {
+      throw new Error("still failing");
+    });
+    const cA = makeMockConnector("connA", { commitModule: commitA });
+
+    const manager = new ConnectorManager();
+    manager.__setConnectorsForTest({
+      connectors: [cA],
+      crypti: new Map([["connA", makeStubCrypti()]]),
+    });
+    manager.__setRetryQueueForTest(queue);
+    manager.perConnectorState = new Map([["connA", idleState()]]);
+
+    await manager.refreshAll();
+
+    // Entry deleted, last-error surfaced.
+    expect(await queue.list()).toEqual([]);
+    const err = manager.perConnectorState.get("connA")?.lastError;
+    expect(err).toMatch(/gave up after 5 attempts|FileShareInfo retry/);
+  });
+
+  it("refreshAll drain: TTL-expired entries are dropped and surface an issue", async () => {
+    const queue = freshRetryQueue();
+    await queue.wipeAll();
+
+    // Enqueue then backdate `createdAt` past the TTL.
+    const shared = {
+      name: "ttl.bin",
+      mimeType: "application/octet-stream",
+      size: 1,
+      blobKey: "sha256:ttl",
+      checksum: "ttl",
+      sharedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      availableOn: ["connA"],
+      connectorRefs: { connA: "blob-A" },
+    };
+    const { entry } = await queue.enqueue({ shared, pendingConnectorIds: ["connA"] });
+    // 8 min TTL — backdate 9 min.
+    await queue.update({ ...entry, createdAt: Date.now() - 9 * 60_000 });
+
+    const commitA = vi.fn(async () => ({ etag: "eA" }));
+    const cA = makeMockConnector("connA", { commitModule: commitA });
+    const manager = new ConnectorManager();
+    manager.__setConnectorsForTest({
+      connectors: [cA],
+      crypti: new Map([["connA", makeStubCrypti()]]),
+    });
+    manager.__setRetryQueueForTest(queue);
+    manager.perConnectorState = new Map([["connA", idleState()]]);
+
+    await manager.refreshAll();
+
+    // Entry dropped without retry: commit was NOT called.
+    expect(commitA).not.toHaveBeenCalled();
+    expect(await queue.list()).toEqual([]);
+    expect(manager.perConnectorState.get("connA")?.lastError).toMatch(/expired/);
+  });
+
+  it("removeConnector prunes the queue", async () => {
+    const queue = freshRetryQueue();
+    await queue.wipeAll();
+
+    const shared = {
+      name: "p.bin",
+      mimeType: "application/octet-stream",
+      size: 1,
+      blobKey: "sha256:p",
+      checksum: "p",
+      sharedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      availableOn: ["connA", "connB"],
+      connectorRefs: { connA: "ba", connB: "bb" },
+    };
+    await queue.enqueue({ shared, pendingConnectorIds: ["connA", "connB"] });
+    await queue.enqueue({ shared: { ...shared, blobKey: "sha256:onlyA" }, pendingConnectorIds: ["connA"] });
+
+    const cA = makeMockConnector("connA");
+    const cB = makeMockConnector("connB");
+
+    const manager = new ConnectorManager();
+    manager.__setConnectorsForTest({
+      connectors: [cA, cB],
+      crypti: new Map([
+        ["connA", makeStubCrypti()],
+        ["connB", makeStubCrypti()],
+      ]),
+    });
+    manager.__setRetryQueueForTest(queue);
+    manager.perConnectorState = new Map([
+      ["connA", idleState()],
+      ["connB", idleState()],
+    ]);
+
+    // removeConnector hits the real credentials DB via `deleteByConnectorId`
+    // and `listAll`. With fake-indexeddb both are backed by an in-memory
+    // store — `deleteByConnectorId` on a missing key is a no-op, and
+    // `listAll` returns []. The subsequent `#syncConnectorsSerialized`
+    // resets `manager.connectors = []`, which is fine for this test
+    // (we only care about the queue side effect).
+    await manager.removeConnector("connA");
+
+    const remaining = await queue.list();
+    // Entry 1: pendingConnectorIds was [A,B], B remains.
+    // Entry 2: pendingConnectorIds was [A], goes empty → deleted.
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].pendingConnectorIds).toEqual(["connB"]);
+  });
+
+  it("concurrent uploadFile + drain on the same connector actually serialize via the publish lock (no overlap)", async () => {
+    // True concurrency test: stall the upload's phase-2 commitModule with a
+    // deferred, then kick off a drain that targets the same connector. The
+    // drain's commitModule must wait behind the upload's, not run
+    // concurrently. We track `inFlight` / `maxInFlight` and assert
+    // `maxInFlight === 1`.
+    //
+    // We use two pairs of deferreds — `*Enter*` signals when a commitA call
+    // has actually been entered (vs polling microtasks), and `*Gate*` is
+    // the suspension point we release manually. This makes the test
+    // deterministic regardless of how many awaits `uploadFile` does
+    // before reaching commitModule.
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const firstGate = new Promise<void>((r) => {
+      releaseFirst = r;
+    });
+    const secondGate = new Promise<void>((r) => {
+      releaseSecond = r;
+    });
+    let firstEnteredResolve!: () => void;
+    let secondEnteredResolve!: () => void;
+    const firstEntered = new Promise<void>((r) => {
+      firstEnteredResolve = r;
+    });
+    const secondEntered = new Promise<void>((r) => {
+      secondEnteredResolve = r;
+    });
+    let callCount = 0;
+    const commitA = vi.fn(async () => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      callCount++;
+      const isFirst = callCount === 1;
+      // Signal the test that we've entered commitA.
+      (isFirst ? firstEnteredResolve : secondEnteredResolve)();
+      try {
+        await (isFirst ? firstGate : secondGate);
+      } finally {
+        inFlight--;
+      }
+      return { etag: "eA" };
+    });
+    const cA = makeMockConnector("connA", {
+      uploadBlobBytes: vi.fn(async () => "blob-A"),
+      commitModule: commitA,
+    });
+
+    const queue = freshRetryQueue();
+    await queue.wipeAll();
+    const manager = new ConnectorManager();
+    manager.__setConnectorsForTest({
+      connectors: [cA],
+      crypti: new Map([["connA", makeStubCrypti()]]),
+      blobCipher: new Map([["connA", makeIdBlobCipher()]]),
+    });
+    manager.__setRetryQueueForTest(queue);
+    manager.perConnectorState = new Map([["connA", idleState()]]);
+
+    // Seed the queue with an entry the drain will try to publish.
+    const seedShared: SharedFile = {
+      name: "seed.bin",
+      mimeType: "application/octet-stream",
+      size: 1,
+      blobKey: "sha256:seed",
+      checksum: "seed",
+      sharedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      availableOn: ["connA"],
+      connectorRefs: { connA: "blob-A" },
+    };
+    await queue.enqueue({ shared: seedShared, pendingConnectorIds: ["connA"] });
+
+    // Start uploadFile. Phase 1 completes; phase 2's commitModule is the
+    // FIRST commitA call — it suspends on firstGate.
+    const file = new File([new Uint8Array([7])], "lock.bin", { type: "application/octet-stream" });
+    const uploadPromise = manager.uploadFile(file);
+
+    // Wait deterministically for commitA to be entered (avoids any
+    // microtask-count guesswork).
+    await firstEntered;
+    expect(inFlight).toBe(1);
+
+    // Now start refreshAll. Its drain queues behind the upload's lock —
+    // commitA's SECOND call hasn't started yet, so `callCount` stays 1.
+    const refreshPromise = manager.refreshAll();
+    // Let the drain at least get to the point where it would attempt the
+    // lock acquisition; the lock makes it wait, so neither inFlight nor
+    // callCount change.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(inFlight).toBe(1);
+    expect(maxInFlight).toBe(1);
+    expect(callCount).toBe(1);
+
+    // Release the upload. The lock frees → drain's commitA acquires it.
+    releaseFirst();
+    await secondEntered;
+    expect(callCount).toBe(2);
+    expect(inFlight).toBe(1); // upload exited, drain entered — still 1
+    expect(maxInFlight).toBe(1); // never overlapped
+
+    // Release the drain.
+    releaseSecond();
+    await Promise.all([uploadPromise, refreshPromise]);
+
+    expect(maxInFlight).toBe(1);
+    expect(await queue.list()).toEqual([]);
   });
 });
