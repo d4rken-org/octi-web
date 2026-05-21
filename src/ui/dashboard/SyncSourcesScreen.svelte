@@ -2,6 +2,7 @@
   import type { ConnectorManager } from "../../sync/connector-manager.svelte";
   import ConnectorCard from "./ConnectorCard.svelte";
   import ConnectorDevicesScreen from "./ConnectorDevicesScreen.svelte";
+  import ConnectorShareSheet from "./ConnectorShareSheet.svelte";
   import DisconnectConfirmDialog from "./DisconnectConfirmDialog.svelte";
   import Sheet from "./Sheet.svelte";
 
@@ -12,6 +13,8 @@
    * Per card actions:
    *   - Refresh: trigger a refresh of all connectors (the manager doesn't
    *     expose a per-connector refresh; PR 3 follow-up if needed).
+   *   - Share: mint a share code for THIS connector's account so another
+   *     device can join it. (Wire calls are per-connector — see ShareCode.svelte.)
    *   - View devices: drill into the per-connector device list.
    *   - Disconnect: confirm + remove the credential. Other connectors
    *     stay active.
@@ -34,12 +37,18 @@
 
   /** Sub-sheet state. Only one of these is open at a time. */
   let devicesForConnectorId = $state<string | null>(null);
+  let shareForConnectorId = $state<string | null>(null);
   let confirmDisconnectId = $state<string | null>(null);
   let disconnecting = $state(false);
 
   const devicesForConnector = $derived(
     devicesForConnectorId
       ? manager.connectors.find((c) => c.connectorId === devicesForConnectorId) ?? null
+      : null,
+  );
+  const shareForConnector = $derived(
+    shareForConnectorId
+      ? manager.connectors.find((c) => c.connectorId === shareForConnectorId) ?? null
       : null,
   );
   const confirmDisconnectConnector = $derived(
@@ -74,6 +83,7 @@
         {connector}
         state={manager.perConnectorState.get(connector.connectorId)}
         onRefresh={() => void manager.refreshAll()}
+        onShare={() => (shareForConnectorId = connector.connectorId)}
         onViewDevices={() => (devicesForConnectorId = connector.connectorId)}
         onDisconnect={() => (confirmDisconnectId = connector.connectorId)}
       />
@@ -93,6 +103,13 @@
     state={manager.perConnectorState.get(devicesForConnector.connectorId)}
     {ownDeviceId}
     onClose={() => (devicesForConnectorId = null)}
+  />
+{/if}
+
+{#if shareForConnector}
+  <ConnectorShareSheet
+    connector={shareForConnector}
+    onClose={() => (shareForConnectorId = null)}
   />
 {/if}
 
