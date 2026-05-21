@@ -1,4 +1,5 @@
 import { fileShareRetryQueue } from "../sync/fileshare-retry-queue";
+import { connectorStateCache } from "./connector-state-cache";
 import { credentialsRepo } from "./credentials-repo";
 import { tileLayoutRepo } from "./tile-layout-repo";
 
@@ -7,12 +8,13 @@ import { tileLayoutRepo } from "./tile-layout-repo";
  * Sign-out used to inline these wipes in `DashboardStub.signOut`; centralising
  * them means a future PR adding a new persistent store can't accidentally
  * leave it behind on sign-out (which would resurrect on next link with stale
- * data — see the FU3 plan).
+ * data).
  *
  * Stores wiped today:
  *   - {@code CredentialsRepo} — linked accounts, encryption keysets.
  *   - {@code TileLayoutRepo} — per-device dashboard layouts.
  *   - {@code FileShareRetryQueue} — pending file-share publishes.
+ *   - {@code ConnectorStateCache} — persisted per-connector refresh state.
  *
  * NOT wiped: {@code IdentitySettings.ownDeviceId}. That intentionally persists
  * across sign-out so re-linking from the same browser keeps a single peer
@@ -27,5 +29,6 @@ export async function wipeLocalSyncData(): Promise<void> {
     credentialsRepo.wipeAll().catch(() => undefined),
     tileLayoutRepo.wipeAll().catch(() => undefined),
     fileShareRetryQueue.wipeAll().catch(() => undefined),
+    connectorStateCache.wipeAll().catch(() => undefined),
   ]);
 }
