@@ -15,9 +15,11 @@
   let {
     connector,
     onClose,
+    onDeviceLinked,
   }: {
     connector: OctiServerConnector;
     onClose: () => void;
+    onDeviceLinked?: () => void;
   } = $props();
 
   const record = $derived(connector.record);
@@ -40,6 +42,6 @@
     `ShareCode` instance whenever the target changes.
   -->
   {#key connector.connectorId}
-    <ShareCode {connector} />
+    <ShareCode {connector} {onDeviceLinked} />
   {/key}
 </Sheet>

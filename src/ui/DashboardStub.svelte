@@ -275,6 +275,11 @@
     showShareSheet = false;
     pickedShareConnectorId = null;
   }
+  function handleShareDeviceLinked(connectorId: string) {
+    closeShareSheet();
+    uploadStatus = "Device linked.";
+    void manager.refreshOne(connectorId);
+  }
   function openSyncSources() {
     showSyncSources = true;
   }
@@ -413,7 +418,10 @@
     onClose={closeShareSheet}
   >
     {#if manager.connectors.length === 1}
-      <ShareCode connector={manager.connectors[0]} />
+      <ShareCode
+        connector={manager.connectors[0]}
+        onDeviceLinked={() => handleShareDeviceLinked(manager.connectors[0].connectorId)}
+      />
     {:else}
       <ul class="share-picker">
         {#each manager.connectors as c (c.connectorId)}
@@ -455,7 +463,11 @@
             <div class="share-row-body" id={bodyId} hidden={!expanded}>
               {#if expanded}
                 <!-- compact: row head already shows the connector identity. -->
-                <ShareCode connector={c} compact />
+                <ShareCode
+                  connector={c}
+                  compact
+                  onDeviceLinked={() => handleShareDeviceLinked(c.connectorId)}
+                />
               {/if}
             </div>
           </li>
