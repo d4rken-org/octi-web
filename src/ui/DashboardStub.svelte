@@ -57,6 +57,17 @@
   let publishStatus = $state<"idle" | "publishing" | "done" | "error">("idle");
   let publishError = $state<string | null>(null);
   let showShareSheet = $state(false);
+  /**
+   * Which connector's `<ShareCode>` block is expanded in the multi-connector
+   * picker. `null` means no row is expanded yet (the user hasn't picked a
+   * target). On open with a single connector, this is set to that connector's
+   * id so the single-connector flow is unchanged. Switching rows flips this
+   * value, which conditional-renders one `<ShareCode>` instance — the previous
+   * unmounts, the new mounts fresh, so QR/link state doesn't leak across
+   * targets (which would be especially bad — the link payload includes that
+   * connector's encryption keyset).
+   */
+  let pickedShareConnectorId = $state<string | null>(null);
   let showSettings = $state(false);
   let showSyncSources = $state(false);
   let showIssues = $state(false);
@@ -248,10 +259,16 @@
     showSettings = false;
   }
   function openShareSheet() {
+    // Single-connector: auto-expand the only target so the user lands on the
+    // existing mint button without an extra click. Multi-connector: leave
+    // unset; the picker list invites the user to choose.
+    pickedShareConnectorId =
+      manager.connectors.length === 1 ? manager.connectors[0].connectorId : null;
     showShareSheet = true;
   }
   function closeShareSheet() {
     showShareSheet = false;
+    pickedShareConnectorId = null;
   }
   function openSyncSources() {
     showSyncSources = true;
@@ -381,9 +398,65 @@
   />
 {/if}
 
-{#if showShareSheet && primaryConnector}
-  <Sheet title="Add another device" subtitle="Share a one-time code or QR" wide onClose={closeShareSheet}>
-    <ShareCode connector={primaryConnector} />
+{#if showShareSheet && manager.connectors.length > 0}
+  <Sheet
+    title="Add another device"
+    subtitle={manager.connectors.length === 1
+      ? "Share a one-time code or QR"
+      : `Pick which of your ${manager.connectors.length} sync sources to share`}
+    wide
+    onClose={closeShareSheet}
+  >
+    {#if manager.connectors.length === 1}
+      <ShareCode connector={manager.connectors[0]} />
+    {:else}
+      <ul class="share-picker">
+        {#each manager.connectors as c (c.connectorId)}
+          {@const expanded = pickedShareConnectorId === c.connectorId}
+          {@const bodyId = `share-row-body-${c.connectorId}`}
+          <li class="share-row" class:expanded>
+            <!--
+              Span-only descendants because `<div>` inside `<button>` is
+              invalid HTML and can trip a11y tooling. `display: flex` on the
+              button itself gives us the same layout as the previous div tree.
+            -->
+            <button
+              type="button"
+              class="share-row-head"
+              aria-expanded={expanded}
+              aria-controls={bodyId}
+              onclick={() =>
+                (pickedShareConnectorId = expanded ? null : c.connectorId)}
+            >
+              <span class="share-row-ident">
+                <span class="share-row-title">{c.record.deviceLabel || "Browser"}</span>
+                <span class="share-row-subtitle">
+                  {c.record.serverAddress.domain} · …{c.record.accountId.slice(-6)}
+                </span>
+              </span>
+              <span class="share-row-chev" aria-hidden="true">
+                {expanded ? "▾" : "▸"}
+              </span>
+            </button>
+            <!--
+              Wrapper stays in the DOM regardless of `expanded` so the
+              button's `aria-controls` always points at a real element.
+              Only the inner `<ShareCode>` is conditionally rendered — that
+              still gives us the fresh-mount-on-switch invariant we need to
+              prevent leaking link/QR state across connectors (the link
+              payload bundles the keyset; cross-target leak = wrong account's
+              keyset exposed to the joiner).
+            -->
+            <div class="share-row-body" id={bodyId} hidden={!expanded}>
+              {#if expanded}
+                <!-- compact: row head already shows the connector identity. -->
+                <ShareCode connector={c} compact />
+              {/if}
+            </div>
+          </li>
+        {/each}
+      </ul>
+    {/if}
   </Sheet>
 {/if}
 
@@ -453,5 +526,69 @@
   .banner.err {
     background: color-mix(in srgb, var(--md-color-error) 18%, transparent);
     color: var(--md-color-error);
+  }
+
+  /* Multi-connector share picker (only shown when >= 2 connectors are linked). */
+  .share-picker {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .share-row {
+    border: 1px solid var(--md-color-outline-variant);
+    border-radius: 12px;
+    margin-bottom: 10px;
+    background: var(--md-color-surface-container-low);
+    overflow: hidden;
+  }
+  .share-row:last-child { margin-bottom: 0; }
+  .share-row.expanded {
+    border-color: var(--md-color-outline);
+  }
+  .share-row-head {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: transparent;
+    border: none;
+    padding: 12px 14px;
+    color: var(--md-color-on-surface);
+    cursor: pointer;
+    text-align: left;
+  }
+  .share-row-head:hover {
+    background: color-mix(in srgb, var(--md-color-on-surface) 6%, transparent);
+  }
+  .share-row-ident {
+    flex: 1;
+    min-width: 0;
+    /* span-as-block: see the comment on the button markup. */
+    display: flex;
+    flex-direction: column;
+  }
+  .share-row-title {
+    display: block;
+    font-size: 0.95rem;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .share-row-subtitle {
+    display: block;
+    font-size: 0.78rem;
+    color: var(--md-color-on-surface-variant);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .share-row-chev {
+    font-size: 0.9rem;
+    color: var(--md-color-on-surface-variant);
+  }
+  .share-row-body {
+    padding: 0 14px 14px;
+    border-top: 1px solid var(--md-color-outline-variant);
   }
 </style>

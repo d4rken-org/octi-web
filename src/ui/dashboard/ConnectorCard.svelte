@@ -17,6 +17,7 @@
     connector,
     state,
     onRefresh,
+    onShare,
     onViewDevices,
     onDisconnect,
   }: {
@@ -24,6 +25,7 @@
     /** May be undefined if the manager hasn't seeded state yet (shouldn't happen post-bootstrap). */
     state: ConnectorRefreshState | undefined;
     onRefresh: () => void;
+    onShare: () => void;
     onViewDevices: () => void;
     onDisconnect: () => void;
   } = $props();
@@ -77,6 +79,14 @@
       refresh is a follow-up (manager.refreshOne(connectorId)).
     -->
     <button type="button" class="action" onclick={onRefresh}>Refresh all</button>
+    <button
+      type="button"
+      class="action"
+      onclick={onShare}
+      data-testid="connector-share"
+    >
+      Share
+    </button>
     <button type="button" class="action" onclick={onViewDevices}>View devices</button>
     <button
       type="button"
