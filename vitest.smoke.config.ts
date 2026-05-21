@@ -1,3 +1,4 @@
+import { svelte } from "@sveltejs/vite-plugin-svelte";
 import { defineConfig } from "vitest/config";
 
 /**
@@ -8,6 +9,7 @@ import { defineConfig } from "vitest/config";
  * the smoke job.
  */
 export default defineConfig({
+  plugins: [svelte({ hot: false })],
   test: {
     environment: "node",
     include: ["src/__smoke__/**/*.test.ts"],
