@@ -30,6 +30,8 @@ import {
   serializeMetaInfo,
   type MetaInfo,
 } from "../src/modules/meta";
+import { octiServerConnectorId } from "../src/protocol/connector-id";
+import { OFFICIAL_SERVERS } from "../src/protocol/models";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, "..");
@@ -75,8 +77,14 @@ export interface GeneratedFixtures {
 /* ─────────────────────── Canonical inputs ─────────────────────── */
 
 const FAUX_DEVICE_ID = "11111111-2222-3333-4444-555555555555";
-const FAUX_CONNECTOR =
-  "kserver-prod.kserver.octi.darken.eu-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+const FAUX_ACCOUNT_ID_PROD = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+const FAUX_ACCOUNT_ID_BETA = "ffffffff-1111-2222-3333-444444444444";
+// Compute connector IDs via the production function so a future format change in
+// `src/protocol/connector-id.ts` propagates into these fixtures (and the producer's
+// published-self-check trips on regen). Hardcoding the literal would let the function
+// drift while these vectors keep the old format, masking a wire-format break.
+const FAUX_CONNECTOR = octiServerConnectorId(OFFICIAL_SERVERS.PROD, FAUX_ACCOUNT_ID_PROD);
+const FAUX_CONNECTOR_BETA = octiServerConnectorId(OFFICIAL_SERVERS.BETA, FAUX_ACCOUNT_ID_BETA);
 
 // Meta: 3 vectors covering full / minimal / unicode-label. These are the typed
 // MetaInfo objects we'd actually publish; verify tests re-serialize and check bytes.
@@ -254,15 +262,10 @@ const FILES_VECTORS: Array<{ name: string; input: FileShareInfo }> = [
           checksum: "0000000000000000000000000000000000000000000000000000000000000007",
           sharedAt: "2026-05-01T12:00:00Z",
           expiresAt: "2026-05-31T12:00:00Z",
-          availableOn: [
-            "kserver-prod.kserver.octi.darken.eu-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-            "kserver-beta.kserver.octi.darken.eu-ffffffff-1111-2222-3333-444444444444",
-          ],
+          availableOn: [FAUX_CONNECTOR, FAUX_CONNECTOR_BETA],
           connectorRefs: {
-            "kserver-prod.kserver.octi.darken.eu-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee":
-              "blob-id-prod-7777",
-            "kserver-beta.kserver.octi.darken.eu-ffffffff-1111-2222-3333-444444444444":
-              "blob-id-beta-7777",
+            [FAUX_CONNECTOR]: "blob-id-prod-7777",
+            [FAUX_CONNECTOR_BETA]: "blob-id-beta-7777",
           },
         },
       ],
