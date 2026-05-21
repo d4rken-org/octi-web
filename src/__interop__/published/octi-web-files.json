@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "module": "eu.darken.octi.module.core.files",
+  "producer": "d4rken-org/octi-web",
+  "note": "Canonical FileShareInfo payloads octi-web emits. Includes a >Int.MAX_VALUE size vector to pin Long handling on the JVM consumers.",
+  "vectors": [
+    {
+      "name": "empty",
+      "payloadJson": "{\"files\":[],\"deleteRequests\":[]}",
+      "sha256": "0019c0c1e032eafa1ffc39afc0294a1f6e19306e360d725db7627ab4b8381256",
+      "byteLength": 32
+    },
+    {
+      "name": "single-file",
+      "payloadJson": "{\"files\":[{\"name\":\"notes.txt\",\"mimeType\":\"text/plain\",\"size\":1234,\"blobKey\":\"sha256:0000000000000000000000000000000000000000000000000000000000000001\",\"checksum\":\"0000000000000000000000000000000000000000000000000000000000000001\",\"sharedAt\":\"2026-05-01T12:00:00Z\",\"expiresAt\":\"2026-05-31T12:00:00Z\",\"availableOn\":[\"kserver-prod.kserver.octi.darken.eu-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\"],\"connectorRefs\":{\"kserver-prod.kserver.octi.darken.eu-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\":\"blob-id-aaaa\"}}],\"deleteRequests\":[]}",
+      "sha256": "91fe12a8ee3aa015027ad3eab79b73d4741ad9b8a9b2288af61dacf2dbdd326b",
+      "byteLength": 518
+    },
+    {
+      "name": "with-multiple-files",
+      "payloadJson": "{\"files\":[{\"name\":\"alpha.bin\",\"mimeType\":\"application/octet-stream\",\"size\":256,\"blobKey\":\"sha256:0000000000000000000000000000000000000000000000000000000000000002\",\"checksum\":\"0000000000000000000000000000000000000000000000000000000000000002\",\"sharedAt\":\"2026-05-01T12:00:00Z\",\"expiresAt\":\"2026-05-31T12:00:00Z\",\"availableOn\":[\"kserver-prod.kserver.octi.darken.eu-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\"],\"connectorRefs\":{\"kserver-prod.kserver.octi.darken.eu-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\":\"blob-id-bbbb\"}},{\"name\":\"beta.pdf\",\"mimeType\":\"application/pdf\",\"size\":4096,\"blobKey\":\"sha256:0000000000000000000000000000000000000000000000000000000000000003\",\"checksum\":\"0000000000000000000000000000000000000000000000000000000000000003\",\"sharedAt\":\"2026-05-01T13:00:00Z\",\"expiresAt\":\"2026-05-31T13:00:00Z\",\"availableOn\":[\"kserver-prod.kserver.octi.darken.eu-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\"],\"connectorRefs\":{\"kserver-prod.kserver.octi.darken.eu-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\":\"blob-id-cccc\"}}],\"deleteRequests\":[]}",
+      "sha256": "9831cf76fc2dadd4de36a8ac7702d05f3b9af64255649f562ef7eb7aaa0cd768",
+      "byteLength": 1022
+    },
+    {
+      "name": "with-delete-requests",
+      "payloadJson": "{\"files\":[{\"name\":\"shared.txt\",\"mimeType\":\"text/plain\",\"size\":100,\"blobKey\":\"sha256:0000000000000000000000000000000000000000000000000000000000000004\",\"checksum\":\"0000000000000000000000000000000000000000000000000000000000000004\",\"sharedAt\":\"2026-05-01T12:00:00Z\",\"expiresAt\":\"2026-05-31T12:00:00Z\",\"availableOn\":[\"kserver-prod.kserver.octi.darken.eu-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\"],\"connectorRefs\":{\"kserver-prod.kserver.octi.darken.eu-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\":\"blob-id-dddd\"}}],\"deleteRequests\":[{\"targetDeviceId\":\"99999999-8888-7777-6666-555555555555\",\"blobKey\":\"sha256:0000000000000000000000000000000000000000000000000000000000000005\",\"requestedAt\":\"2026-05-10T00:00:00Z\",\"retainUntil\":\"2026-05-17T00:00:00Z\"}]}",
+      "sha256": "4d36a90488bf3908fe0f2c6c4720f86a6ab549fea337b05ddc96805c0d886a7c",
+      "byteLength": 733
+    },
+    {
+      "name": "multi-connector",
+      "payloadJson": "{\"files\":[{\"name\":\"shared-across.bin\",\"mimeType\":\"application/octet-stream\",\"size\":512,\"blobKey\":\"sha256:0000000000000000000000000000000000000000000000000000000000000007\",\"checksum\":\"0000000000000000000000000000000000000000000000000000000000000007\",\"sharedAt\":\"2026-05-01T12:00:00Z\",\"expiresAt\":\"2026-05-31T12:00:00Z\",\"availableOn\":[\"kserver-prod.kserver.octi.darken.eu-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\",\"kserver-beta.kserver.octi.darken.eu-ffffffff-1111-2222-3333-444444444444\"],\"connectorRefs\":{\"kserver-prod.kserver.octi.darken.eu-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\":\"blob-id-prod-7777\",\"kserver-beta.kserver.octi.darken.eu-ffffffff-1111-2222-3333-444444444444\":\"blob-id-beta-7777\"}}],\"deleteRequests\":[]}",
+      "sha256": "dff0fb967ff528099d1d43c5df64aa41d4a8b5eb7d52f9e55257f02253b3743a",
+      "byteLength": 714
+    },
+    {
+      "name": "files-large",
+      "payloadJson": "{\"files\":[{\"name\":\"big.iso\",\"mimeType\":\"application/octet-stream\",\"size\":8000000000,\"blobKey\":\"sha256:0000000000000000000000000000000000000000000000000000000000000006\",\"checksum\":\"0000000000000000000000000000000000000000000000000000000000000006\",\"sharedAt\":\"2026-05-01T12:00:00Z\",\"expiresAt\":\"2026-05-31T12:00:00Z\",\"availableOn\":[\"kserver-prod.kserver.octi.darken.eu-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\"],\"connectorRefs\":{\"kserver-prod.kserver.octi.darken.eu-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\":\"blob-id-eeee\"}}],\"deleteRequests\":[]}",
+      "sha256": "cdf36b0c278f65ce3f4e8fd6107b59d4fc65774267f1f48226fd99d06259488c",
+      "byteLength": 536
+    }
+  ]
+}

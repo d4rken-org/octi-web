@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "module": "eu.darken.octi.module.core.meta",
+  "producer": "d4rken-org/octi-web",
+  "note": "Canonical MetaInfo payloads octi-web emits. Consumers (octi, octi-desktop) must decode each `payloadJson` through their `kotlinx.serialization` MetaInfo.",
+  "vectors": [
+    {
+      "name": "full",
+      "payloadJson": "{\"deviceLabel\":\"Test Browser\",\"deviceId\":{\"id\":\"11111111-2222-3333-4444-555555555555\"},\"octiVersionName\":\"0.0.0-test\",\"octiGitSha\":\"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\",\"deviceManufacturer\":\"Mozilla\",\"deviceName\":\"Firefox 134.0 on Linux\",\"deviceType\":\"BROWSER\",\"osType\":\"linux\",\"osVersionName\":\"6.8.0\"}",
+      "sha256": "5924fe0bac2cedfa681d11d33a30ed7ea9a9eec4b3240f084592f9c692cfa5b2",
+      "byteLength": 307
+    },
+    {
+      "name": "minimal",
+      "payloadJson": "{\"deviceId\":{\"id\":\"11111111-2222-3333-4444-555555555555\"},\"octiVersionName\":\"0.0.0-test\",\"octiGitSha\":\"dev\",\"deviceManufacturer\":\"Mozilla\",\"deviceName\":\"Browser\",\"deviceType\":\"BROWSER\"}",
+      "sha256": "2773b5f7f01305cdc3b3d347ee05e5165f60cd3ff52049af1e4d048f062a7d68",
+      "byteLength": 185
+    },
+    {
+      "name": "unicode-label",
+      "payloadJson": "{\"deviceLabel\":\"ブラウザ 👋 العربية\",\"deviceId\":{\"id\":\"11111111-2222-3333-4444-555555555555\"},\"octiVersionName\":\"0.0.0-test\",\"octiGitSha\":\"dev\",\"deviceManufacturer\":\"Mozilla\",\"deviceName\":\"Firefox\",\"deviceType\":\"BROWSER\",\"osType\":\"linux\"}",
+      "sha256": "5cb54bed4c4b1203a7a1f92e65f07ed400f7f8d0fdd443a0513c544010aaa6a5",
+      "byteLength": 251
+    }
+  ]
+}

@@ -56,6 +56,12 @@ test that pins the format:
   edit cached files.
 - `modules/<name>.test.ts` — backward-compat JSON for each module.
 - `linking/linking-data.test.ts` — gzip + base64 link payload.
+- `__interop__/published-self-check.test.ts` — pins what octi-web publishes
+  for app-main and octi-desktop to consume. Re-runs the generator
+  (`tools/generate-fixtures.ts`) and asserts the committed
+  `src/__interop__/published/{manifest, octi-web-{meta,clipboard,files}}.json`
+  files are byte-equal to fresh output. Regenerate via `pnpm fixtures:generate`
+  after touching `serializeXxxInfo` or the canonical inputs in the generator.
 
 When changing wire format intentionally, update the fixture in a dedicated
 commit so the diff is reviewable in isolation.

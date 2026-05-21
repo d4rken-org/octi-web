@@ -13,6 +13,7 @@
     "test:watch": "vitest",
     "test:smoke": "vitest run --config vitest.smoke.config.ts",
     "fixtures:sync": "tsx tools/sync-fixtures.ts",
+    "fixtures:generate": "tsx tools/generate-fixtures.ts",
     "bootstrap-peer": "tsx tools/screenshots/bootstrap-peer.ts",
     "e2e": "playwright test tests/e2e/link-and-capture.spec.ts",
     "e2e:smoke": "playwright test tests/e2e/smoke.spec.ts",
