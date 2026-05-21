@@ -21,7 +21,8 @@ describe("payload — JVM↔TS golden vectors (AES-GCM-SIV)", () => {
     expect(fixture.gcmsiv.keysetType).toBe("AES256_GCM_SIV");
     expect(fixture.siv.keysetType).toBe("AES256_SIV");
     expect(fixture.gcmsiv.vectors.length).toBeGreaterThanOrEqual(3);
-    expect(INTEROP_LOCK.source).toBe("d4rken-org/octi");
+    // v2 lock pins the source under `sources["<owner>/<repo>"]`.
+    expect("d4rken-org/octi" in INTEROP_LOCK.sources).toBe(true);
   });
 
   for (const v of fixture.gcmsiv.vectors) {
