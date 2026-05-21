@@ -11,8 +11,8 @@
    * sheet. Mirrors Android's `SyncListScreen`.
    *
    * Per card actions:
-   *   - Refresh: trigger a refresh of all connectors (the manager doesn't
-   *     expose a per-connector refresh; PR 3 follow-up if needed).
+   *   - Refresh: trigger a refresh of THIS connector only via
+   *     `manager.refreshOne(connectorId)`. Other connectors are untouched.
    *   - Share: mint a share code for THIS connector's account so another
    *     device can join it. (Wire calls are per-connector — see ShareCode.svelte.)
    *   - View devices: drill into the per-connector device list.
@@ -82,7 +82,7 @@
       <ConnectorCard
         {connector}
         state={manager.perConnectorState.get(connector.connectorId)}
-        onRefresh={() => void manager.refreshAll()}
+        onRefresh={() => void manager.refreshOne(connector.connectorId)}
         onShare={() => (shareForConnectorId = connector.connectorId)}
         onViewDevices={() => (devicesForConnectorId = connector.connectorId)}
         onDisconnect={() => (confirmDisconnectId = connector.connectorId)}

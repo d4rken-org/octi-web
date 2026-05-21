@@ -83,8 +83,20 @@ export class ConnectorManager {
   connectors = $state<OctiServerConnector[]>([]);
   /** Per-connector refresh state. Survives errors so the merge stays populated. */
   perConnectorState = $state<Map<string, ConnectorRefreshState>>(new Map());
-  /** True while at least one connector's refresh is in flight. */
+  /**
+   * True while any refresh is in flight — a full-fan-out `refreshAll()` OR a
+   * per-connector `refreshOne()`. Both paths route through
+   * {@link #beginRefreshPass} / {@link #endRefreshPass}, which refcount via
+   * {@link #loadingCount} to keep this flag accurate under overlapping
+   * passes.
+   *
+   * Kept as `$state` rather than `$derived` so callers outside a Svelte
+   * tracking scope (e.g. tests) see the live value on each read — Svelte 5
+   * `$derived` only auto-recomputes for readers inside a tracker.
+   */
   loading = $state(false);
+  /** Refcount of currently-running refresh passes; plain field (non-`$state`). */
+  #loadingCount = 0;
   /** Wall-clock of the last completed `refreshAll()` (any state). */
   lastRefreshedAt = $state<Date | null>(null);
   /** Wall-clock of the last `refreshAll()` where every connector succeeded. */
@@ -110,6 +122,14 @@ export class ConnectorManager {
   // ─── Generation guards ───────────────────────────────────────
   #refreshSeq = 0;
   #connectorSeq = new Map<string, number>();
+  /**
+   * Per-connector spinner-clear token. Bumped at the start of every
+   * `#refreshOne` (whether driven by `refreshAll` or by a public
+   * `refreshOne`). Only the most-recent pass may clear that connector's
+   * `refreshing` flag on exit — so a late completion of an older pass
+   * can't drop the spinner while a newer pass is still in flight.
+   */
+  #refreshOneToken = new Map<string, number>();
   /**
    * Single-flight guard for connector-list rebuilds. {@link bootstrap},
    * {@link addConnector}, and {@link removeConnector} all rebuild the list
@@ -150,7 +170,7 @@ export class ConnectorManager {
    * Other connectors keep working.
    */
   async removeConnector(connectorId: string): Promise<void> {
-    this.#bumpConnectorSeq(connectorId);
+    this.#invalidateConnectorRefresh(connectorId);
     this.perConnectorState.delete(connectorId);
     this.perConnectorState = new Map(this.perConnectorState); // trigger reactivity
     this.#crypti.delete(connectorId);
@@ -200,7 +220,7 @@ export class ConnectorManager {
     const nextIds = new Set(next.map((c) => c.connectorId));
     for (const id of [...this.perConnectorState.keys()]) {
       if (!nextIds.has(id)) {
-        this.#bumpConnectorSeq(id);
+        this.#invalidateConnectorRefresh(id);
         this.perConnectorState.delete(id);
         this.#crypti.delete(id);
         this.#blobCipher.delete(id);
@@ -233,6 +253,7 @@ export class ConnectorManager {
           lastError: null,
           lastRefreshedAt: null,
           lastSuccessAt: null,
+          refreshing: false,
         },
       );
     }
@@ -244,6 +265,38 @@ export class ConnectorManager {
     this.#connectorSeq.set(connectorId, (this.#connectorSeq.get(connectorId) ?? 0) + 1);
   }
 
+  /**
+   * Invalidate every in-flight refresh signal for one connector — used on
+   * teardown (`removeConnector`, `#syncConnectorsFromRecords` when a
+   * credential is gone). Bumps both:
+   *   - `#connectorSeq` so any in-flight `#refreshOne` writes are discarded.
+   *   - `#refreshOneToken` so any late completion's spinner clear is a no-op
+   *     even if the connector's row is later re-created (defensive — the
+   *     `#updateState` no-op on missing slot would catch it anyway).
+   *
+   * Centralised so the two teardown paths stay in sync; an earlier draft
+   * bumped only one and that was the kind of drift that becomes a bug later.
+   */
+  #invalidateConnectorRefresh(connectorId: string): void {
+    this.#bumpConnectorSeq(connectorId);
+    this.#refreshOneToken.set(
+      connectorId,
+      (this.#refreshOneToken.get(connectorId) ?? 0) + 1,
+    );
+  }
+
+  /** Increment the refresh refcount; flip {@link loading} on the rising edge. */
+  #beginRefreshPass(): void {
+    this.#loadingCount++;
+    if (this.#loadingCount === 1) this.loading = true;
+  }
+
+  /** Decrement the refresh refcount; flip {@link loading} on the falling edge. */
+  #endRefreshPass(): void {
+    this.#loadingCount--;
+    if (this.#loadingCount === 0) this.loading = false;
+  }
+
   // ─── Refresh ─────────────────────────────────────────────────
   /**
    * Fan-out refresh across all active connectors. Per-connector errors are
@@ -252,7 +305,7 @@ export class ConnectorManager {
    */
   async refreshAll(): Promise<void> {
     const mySeq = ++this.#refreshSeq;
-    this.loading = true;
+    this.#beginRefreshPass();
     try {
       const results = await Promise.all(this.connectors.map((c) => this.#refreshOne(c, mySeq)));
       if (mySeq !== this.#refreshSeq) return; // a newer refreshAll superseded us
@@ -263,11 +316,55 @@ export class ConnectorManager {
       // it would mark every refresh as fulfilled. Track explicit success
       // counts: `lastSuccessAt` only advances when every active connector's
       // refresh completed without error.
+      //
+      // Note: `"stale"` (e.g. a per-connector `refreshOne(A)` raced this
+      // pass's leg for A) is NOT `"ok"` — so a full-pass success indicator
+      // only fires when every connector's full-pass leg landed cleanly,
+      // matching the existing semantics.
       if (results.length > 0 && results.every((r) => r === "ok")) {
         this.lastSuccessAt = now;
       }
     } finally {
-      if (mySeq === this.#refreshSeq) this.loading = false;
+      this.#endRefreshPass();
+    }
+  }
+
+  /**
+   * Refresh exactly one connector. Used by the Sync Sources screen's per-card
+   * Refresh button so a single failing connector can be retried without
+   * fanning out across every other linked source.
+   *
+   * Race semantics:
+   *   - **`refreshOne` during `refreshAll`**: this call's per-connector token
+   *     bump stales the full-pass leg for the same connector (it returns
+   *     `"stale"` and skips its write). `refreshAll`'s `lastSuccessAt`
+   *     guard treats `"stale"` as not-`"ok"`, so it won't advance for that
+   *     pass — accurate, since we never observed an all-clear in a single
+   *     fanned-out tick.
+   *   - **`refreshAll` during `refreshOne`**: `refreshAll` bumps the global
+   *     `#refreshSeq` → this `#refreshOne(connector, oldRefreshSeq)`'s
+   *     `isStale()` fires and discards its write. The token gate also
+   *     prevents its late completion from clearing a newer pass's spinner.
+   *   - **`refreshOne(A)` during `refreshOne(A)`**: the second call bumps
+   *     both the per-connector seq and token. The first call's write is
+   *     staled and its spinner clear is gated; only the second writes.
+   */
+  async refreshOne(connectorId: string): Promise<void> {
+    const connector = this.connectors.find((c) => c.connectorId === connectorId);
+    if (!connector) return; // already removed
+    // Invalidate any older in-flight pass for this connector (whether driven
+    // by `refreshAll` or by a prior `refreshOne`).
+    this.#bumpConnectorSeq(connectorId);
+    this.#beginRefreshPass();
+    try {
+      // Use the current global `refreshSeq` as the captured tag: refreshOne
+      // doesn't supersede a refreshAll, so it shouldn't bump the global. If a
+      // refreshAll starts mid-flight, the `isStale()` guard in `#refreshOne`
+      // will see the global advance and discard our write — that's the right
+      // behaviour (the full-pass result is the more authoritative one).
+      await this.#refreshOne(connector, this.#refreshSeq);
+    } finally {
+      this.#endRefreshPass();
     }
   }
 
@@ -279,7 +376,22 @@ export class ConnectorManager {
     const startConnectorSeq = this.#connectorSeq.get(connectorId) ?? 0;
     const crypti = this.#crypti.get(connectorId);
     const cache = this.#etagCache.get(connectorId);
-    if (!crypti || !cache) return "stale"; // raced with remove
+    // `crypti`/`cache` are populated in `#syncConnectorsFromRecords` for every
+    // active connector and only deleted on remove. So `undefined` here means
+    // the connector was removed between `refreshOne()` (which checked
+    // `this.connectors` for membership) and now — i.e. a teardown race. We
+    // skip the token bump and the `refreshing=true` write because the row
+    // has been removed from `perConnectorState` and there's nothing to
+    // spin on. Returning "stale" lets `refreshAll` correctly treat this
+    // leg as not-`"ok"` for its `lastSuccessAt` guard.
+    if (!crypti || !cache) return "stale";
+
+    // Bump and capture the spinner-clear token for THIS pass. Only this
+    // exact token may clear `refreshing` on exit — a later pass increments
+    // the token and the older completion no-ops on its way out, leaving
+    // the newer pass's spinner visible.
+    const myToken = (this.#refreshOneToken.get(connectorId) ?? 0) + 1;
+    this.#refreshOneToken.set(connectorId, myToken);
 
     const isStale = (): boolean =>
       // Either the connector was removed mid-flight OR a fresher refreshAll
@@ -292,6 +404,10 @@ export class ConnectorManager {
       // returns true and every refresh appears stale.
       (this.#connectorSeq.get(connectorId) ?? 0) !== startConnectorSeq ||
       refreshSeq !== this.#refreshSeq;
+
+    // Flip `refreshing=true` for this connector's spinner. Use the per-state
+    // update helper so the Map reference is replaced (Svelte reactivity).
+    this.#updateState(connectorId, (s) => ({ ...s, refreshing: true }));
 
     try {
       const devices = await connector.listDevices();
@@ -328,26 +444,53 @@ export class ConnectorManager {
         entry.modules.set(r.moduleId, { value: r.value, modifiedAt: r.modifiedAt, error: r.error });
       }
 
-      this.perConnectorState.set(connectorId, {
+      this.#updateState(connectorId, () => ({
         devices: deviceMap,
         lastError: null,
         lastRefreshedAt: new Date(),
         lastSuccessAt: new Date(),
-      });
-      this.perConnectorState = new Map(this.perConnectorState); // reactivity
+        // Spinner clears only if this token is still the latest. A newer
+        // pass left `refreshing=true` and bumped the token; leave it.
+        refreshing: this.#refreshOneToken.get(connectorId) !== myToken,
+      }));
       return "ok";
     } catch (e) {
       if (isStale()) return "stale";
-      const prev = this.perConnectorState.get(connectorId);
-      this.perConnectorState.set(connectorId, {
-        devices: prev?.devices ?? new Map(),
+      this.#updateState(connectorId, (prev) => ({
+        devices: prev.devices,
         lastError: e instanceof Error ? e.message : String(e),
         lastRefreshedAt: new Date(),
-        lastSuccessAt: prev?.lastSuccessAt ?? null,
-      });
-      this.perConnectorState = new Map(this.perConnectorState);
+        lastSuccessAt: prev.lastSuccessAt,
+        refreshing: this.#refreshOneToken.get(connectorId) !== myToken,
+      }));
       return "error";
     }
+    // No `finally` cleanup needed:
+    //   - Stale returns (`isStale()` true) intentionally leave the row
+    //     untouched; the newer pass is in charge of `refreshing`.
+    //   - The success / error paths above already clear `refreshing` only
+    //     when this token is still the latest (token gate).
+    //   - The earliest return (`!crypti || !cache`) bails BEFORE setting
+    //     `refreshing=true`, so there's nothing to clean up.
+  }
+
+  /**
+   * Mutate `perConnectorState.get(id)` in place AND replace the Map
+   * reference so Svelte's `$state(Map)` reactivity fires. If the slot is
+   * gone (connector removed mid-flight), this is a no-op.
+   *
+   * Centralised so every refresh / publish path that touches per-connector
+   * state goes through the same shape — adding a new field (e.g. `refreshing`)
+   * only needs to be threaded through here and the type, not every site.
+   */
+  #updateState(
+    connectorId: string,
+    transform: (prev: ConnectorRefreshState) => ConnectorRefreshState,
+  ): void {
+    const prev = this.perConnectorState.get(connectorId);
+    if (!prev) return;
+    this.perConnectorState.set(connectorId, transform(prev));
+    this.perConnectorState = new Map(this.perConnectorState); // reactivity
   }
 
   // ─── Publish fan-out (own modules) ──────────────────────────
@@ -388,14 +531,11 @@ export class ConnectorManager {
 
   #recordPublishError(connectorId: string, moduleLabel: string, e: unknown): void {
     const msg = e instanceof Error ? e.message : String(e);
-    const prev = this.perConnectorState.get(connectorId);
-    if (!prev) return;
-    this.perConnectorState.set(connectorId, {
+    this.#updateState(connectorId, (prev) => ({
       ...prev,
       lastError: `${moduleLabel} publish failed: ${msg}`,
       lastRefreshedAt: new Date(),
-    });
-    this.perConnectorState = new Map(this.perConnectorState);
+    }));
   }
 
   // ─── File-share fan-out ─────────────────────────────────────
@@ -736,6 +876,15 @@ export interface ConnectorRefreshState {
   lastError: string | null;
   lastRefreshedAt: Date | null;
   lastSuccessAt: Date | null;
+  /**
+   * True while a refresh is currently in flight for this connector — set
+   * by `ConnectorManager.refreshOne()` or the per-connector legs of
+   * `refreshAll()`. Used by `ConnectorCard` to show a per-row spinner.
+   * Cleared only by the most-recent in-flight pass (token gate in
+   * `ConnectorManager`) so a stale older completion can't drop a newer
+   * pass's spinner.
+   */
+  refreshing: boolean;
 }
 
 export interface Issue {
