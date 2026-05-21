@@ -2,6 +2,15 @@ import { svelte } from "@sveltejs/vite-plugin-svelte";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
+  // Component tests import `.svelte` files directly. Under Vitest, seed Vite's
+  // client environment for the Svelte plugin's CSS preprocessor and resolve
+  // Svelte's browser entry so `mount()` is available in jsdom.
+  environments: {
+    client: {},
+  },
+  resolve: {
+    conditions: ["browser"],
+  },
   // The svelte plugin compiles `.svelte` and `.svelte.ts` files so vitest can
   // load runes-based modules (notably `ConnectorManager` in
   // `src/sync/connector-manager.svelte.ts`). Without this, `$state` /
