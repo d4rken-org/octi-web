@@ -66,6 +66,36 @@ test that pins the format:
 When changing wire format intentionally, update the fixture in a dedicated
 commit so the diff is reviewable in isolation.
 
+## Upstream gating (this repo's CI)
+
+`.github/workflows/cross-repo-verify.yml` runs on every PR. On PRs that touch
+the allowlisted wire-format paths (`src/modules/`, `src/__interop__/published/`,
+`tools/generate-fixtures.ts`, and the workflow itself), it checks out app-main
+and octi-desktop at their default branches and runs their consumer suites
+against this PR's HEAD using the `INTEROP_FIXTURE_OVERRIDES` env var the
+consumer sync code already accepts (sister gates: app-main's
+`.github/workflows/cross-repo-verify.yml`, A3 / B-phase). A wire-incompatible
+serializer change is blocked at the octi-web PR, not discovered later when a
+consumer happens to bump its pin.
+
+PRs that don't touch the allowlist still run the workflow but echo "no
+wire-format-relevant paths changed; consumer verify will be skipped." and
+exit 0 — required-check status reports green without leaving the check pending.
+
+The override path drops the locked `manifest_sha256` as a trust anchor (no
+committed sha can pin against an arbitrary head SHA) — per-file sha256s in the
+consumer's freshly-fetched manifest stay as the anchor for that run.
+
+### Fork PR limitation
+
+Cross-repo `actions/checkout` of `${{ github.event.pull_request.head.sha }}`
+works for same-repo branch PRs but NOT for fork PRs: the consumer's
+`raw.githubusercontent.com` fetch of a fork-only SHA returns 404 against the
+upstream's path. Fork contributors get a clear failure in the verify job.
+Same constraint exists for any GitHub Actions secret access, so this is not
+a new restriction — same gate behaviour as app-main and octi-desktop's
+sister workflows.
+
 ## Smoke Suite
 
 `src/__smoke__/smoke.test.ts` is excluded from the default `pnpm test` (the
