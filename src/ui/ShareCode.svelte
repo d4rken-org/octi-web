@@ -1,11 +1,15 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
+
   import type { OctiServerConnector } from "../protocol/octi-server-connector";
+  import { startDeviceLinkMonitor } from "../linking/device-link-monitor";
   import { encodeLinkingData } from "../linking/linking-data";
   import { renderQrPng } from "../linking/qr";
 
   let {
     connector,
     compact = false,
+    onDeviceLinked,
   }: {
     connector: OctiServerConnector;
     /**
@@ -16,6 +20,8 @@
      * QR/link still render as normal.
      */
     compact?: boolean;
+    /** Called when another device consumes the minted code and appears on this account. */
+    onDeviceLinked?: () => void;
   } = $props();
 
   let linkText = $state<string | null>(null);
@@ -23,15 +29,46 @@
   let minting = $state(false);
   let error = $state<string | null>(null);
   let copied = $state(false);
+  let stopLinkMonitor: (() => void) | null = null;
 
   const record = $derived(connector.record);
+
+  function stopMonitor() {
+    stopLinkMonitor?.();
+    stopLinkMonitor = null;
+  }
+
+  async function snapshotDeviceIds(): Promise<string[] | null> {
+    try {
+      return (await connector.listDevices()).map((d) => d.id);
+    } catch (e) {
+      console.warn("share-code: failed to snapshot device list", e);
+      return null;
+    }
+  }
+
+  function startMonitor(baselineIds: string[] | null) {
+    stopMonitor();
+    if (!onDeviceLinked) return;
+    stopLinkMonitor = startDeviceLinkMonitor({
+      baselineIds,
+      listDevices: () => connector.listDevices(),
+      onLinked: () => {
+        stopMonitor();
+        onDeviceLinked();
+      },
+      onError: (e) => console.warn("share-code: link monitor failed", e),
+    });
+  }
 
   async function mint() {
     error = null;
     copied = false;
     minting = true;
+    stopMonitor();
     try {
       const r = connector.record;
+      const baselineIds = await snapshotDeviceIds();
       const shareCode = await connector.createShareCode();
       const encoded = encodeLinkingData({
         serverAddress: r.serverAddress,
@@ -40,6 +77,7 @@
       });
       linkText = encoded;
       qrDataUrl = await renderQrPng(encoded);
+      startMonitor(baselineIds);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -57,6 +95,8 @@
       error = `Copy failed: ${e instanceof Error ? e.message : String(e)}`;
     }
   }
+
+  onDestroy(stopMonitor);
 </script>
 
 <section>

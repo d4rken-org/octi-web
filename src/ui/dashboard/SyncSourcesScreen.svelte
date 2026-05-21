@@ -67,6 +67,11 @@
       confirmDisconnectId = null;
     }
   }
+
+  function handleShareDeviceLinked(connectorId: string) {
+    shareForConnectorId = null;
+    void manager.refreshOne(connectorId);
+  }
 </script>
 
 <Sheet
@@ -110,6 +115,7 @@
   <ConnectorShareSheet
     connector={shareForConnector}
     onClose={() => (shareForConnectorId = null)}
+    onDeviceLinked={() => handleShareDeviceLinked(shareForConnector.connectorId)}
   />
 {/if}
 
