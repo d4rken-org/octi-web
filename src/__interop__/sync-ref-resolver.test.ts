@@ -1,45 +1,134 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  type FixtureLock,
+  LOCK_SCHEMA_VERSION,
+  parseLockJson,
   parseOverrides,
-  resolveFromEnv,
-  resolveSource,
+  resolveAll,
+  resolveAllFromEnv,
   SOURCE_PATHS,
   validateLock,
-  type FixtureLock,
 } from "./sync-ref-resolver";
 
 const VALID_SHA40 = "a".repeat(40);
 const ALT_SHA40 = "b".repeat(40);
 const VALID_SHA256 = "a".repeat(64);
 
-const LOCKED_REF = "c".repeat(40);
-const LOCK: FixtureLock = {
-  source: "d4rken-org/octi",
-  ref: LOCKED_REF,
-  manifest_sha256: VALID_SHA256,
-};
+const LOCKED_REF_A = "c".repeat(40);
+const LOCKED_REF_B = "d".repeat(40);
+
+function validLock(sources?: FixtureLock["sources"]): FixtureLock {
+  return {
+    schemaVersion: LOCK_SCHEMA_VERSION,
+    sources: sources ?? {
+      "d4rken-org/octi": { ref: LOCKED_REF_A, manifest_sha256: VALID_SHA256 },
+    },
+  };
+}
+
+describe("parseLockJson", () => {
+  it("accepts a well-formed v2 multi-source shape", () => {
+    const json = JSON.stringify({
+      schemaVersion: 2,
+      sources: {
+        "d4rken-org/octi": { ref: LOCKED_REF_A, manifest_sha256: VALID_SHA256 },
+        "d4rken-org/octi-desktop": { ref: LOCKED_REF_B, manifest_sha256: VALID_SHA256 },
+      },
+    });
+    const lock = parseLockJson(json);
+    expect(lock.schemaVersion).toBe(2);
+    expect(Object.keys(lock.sources).sort()).toEqual([
+      "d4rken-org/octi",
+      "d4rken-org/octi-desktop",
+    ]);
+    expect(lock.sources["d4rken-org/octi"].ref).toBe(LOCKED_REF_A);
+    expect(lock.sources["d4rken-org/octi-desktop"].ref).toBe(LOCKED_REF_B);
+  });
+
+  it("accepts legacy v1 flat shape and normalizes to v2", () => {
+    // Migration-window safety net: a future revert that hand-edits the lockfile back
+    // to v1 still parses. Mirror of octi-desktop's TS-equivalent parser.
+    const json = JSON.stringify({
+      source: "d4rken-org/octi",
+      ref: LOCKED_REF_A,
+      manifest_sha256: VALID_SHA256,
+    });
+    const lock = parseLockJson(json);
+    expect(lock.schemaVersion).toBe(LOCK_SCHEMA_VERSION);
+    expect(lock.sources["d4rken-org/octi"]).toEqual({
+      ref: LOCKED_REF_A,
+      manifest_sha256: VALID_SHA256,
+    });
+  });
+
+  it("rejects an unknown schemaVersion", () => {
+    const json = JSON.stringify({ schemaVersion: 99, sources: {} });
+    expect(() => parseLockJson(json)).toThrow(/schemaVersion 99 not supported/);
+  });
+
+  it("rejects malformed JSON", () => {
+    expect(() => parseLockJson("{not json")).toThrow(/not valid JSON/);
+  });
+});
 
 describe("validateLock", () => {
-  it("accepts a well-formed lock", () => {
-    expect(() => validateLock(LOCK)).not.toThrow();
+  it("accepts a well-formed v2 lock", () => {
+    expect(() => validateLock(validLock())).not.toThrow();
+  });
+
+  it("accepts a multi-source v2 lock", () => {
+    expect(() =>
+      validateLock(
+        validLock({
+          "d4rken-org/octi": { ref: LOCKED_REF_A, manifest_sha256: VALID_SHA256 },
+          "d4rken-org/octi-desktop": { ref: LOCKED_REF_B, manifest_sha256: VALID_SHA256 },
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  it("rejects an empty sources map", () => {
+    expect(() => validateLock(validLock({}))).toThrow(/sources must not be empty/);
+  });
+
+  it("rejects an unsupported schemaVersion", () => {
+    expect(() => validateLock({ ...validLock(), schemaVersion: 1 })).toThrow(/not supported/);
   });
 
   it("rejects malformed owner/repo", () => {
-    expect(() => validateLock({ ...LOCK, source: "no-slash" })).toThrow(/<owner>\/<repo>/);
+    expect(() =>
+      validateLock(validLock({ "no-slash": { ref: LOCKED_REF_A, manifest_sha256: VALID_SHA256 } })),
+    ).toThrow(/<owner>\/<repo>/);
   });
 
   it("rejects bad ref shape", () => {
-    expect(() => validateLock({ ...LOCK, ref: "abc" })).toThrow(/40-character commit SHA/);
-    expect(() => validateLock({ ...LOCK, ref: VALID_SHA40.toUpperCase() })).toThrow(/40-character commit SHA/);
+    expect(() =>
+      validateLock(validLock({ "d4rken-org/octi": { ref: "abc", manifest_sha256: VALID_SHA256 } })),
+    ).toThrow(/40-char lowercase commit SHA/);
+    expect(() =>
+      validateLock(
+        validLock({
+          "d4rken-org/octi": { ref: VALID_SHA40.toUpperCase(), manifest_sha256: VALID_SHA256 },
+        }),
+      ),
+    ).toThrow(/40-char lowercase commit SHA/);
   });
 
   it("rejects bad manifest_sha256 shape", () => {
-    expect(() => validateLock({ ...LOCK, manifest_sha256: "abc" })).toThrow(/64 lowercase hex chars/);
+    expect(() =>
+      validateLock(
+        validLock({ "d4rken-org/octi": { ref: LOCKED_REF_A, manifest_sha256: "abc" } }),
+      ),
+    ).toThrow(/64 lowercase hex chars/);
   });
 
   it("rejects source not in SOURCE_PATHS registry", () => {
-    expect(() => validateLock({ ...LOCK, source: "some/other-repo" })).toThrow(/SOURCE_PATHS registry/);
+    expect(() =>
+      validateLock(
+        validLock({ "some/other-repo": { ref: LOCKED_REF_A, manifest_sha256: VALID_SHA256 } }),
+      ),
+    ).toThrow(/SOURCE_PATHS registry/);
   });
 });
 
@@ -56,6 +145,17 @@ describe("parseOverrides", () => {
   it("parses a valid single-source override", () => {
     const env = JSON.stringify({ "d4rken-org/octi": VALID_SHA40 });
     expect(parseOverrides(env)).toEqual({ "d4rken-org/octi": VALID_SHA40 });
+  });
+
+  it("parses a valid multi-source override", () => {
+    const env = JSON.stringify({
+      "d4rken-org/octi": VALID_SHA40,
+      "d4rken-org/octi-desktop": ALT_SHA40,
+    });
+    expect(parseOverrides(env)).toEqual({
+      "d4rken-org/octi": VALID_SHA40,
+      "d4rken-org/octi-desktop": ALT_SHA40,
+    });
   });
 
   it("throws on non-JSON env value", () => {
@@ -94,83 +194,82 @@ describe("parseOverrides", () => {
       parseOverrides(JSON.stringify({ "d4rken-org/octi": "z".repeat(40) })),
     ).toThrow(/40-char lowercase commit SHA/);
   });
-
-  it("accepts any 40 lowercase hex chars (existence not checked here)", () => {
-    expect(parseOverrides(JSON.stringify({ "d4rken-org/octi": "0".repeat(40) }))).toEqual({
-      "d4rken-org/octi": "0".repeat(40),
-    });
-  });
 });
 
-describe("resolveSource", () => {
-  it("falls through to the lockfile ref + sha when no override matches", () => {
-    expect(resolveSource(LOCK, {})).toEqual({
+describe("resolveAll", () => {
+  it("with no overrides keeps locked ref + manifestSha256", () => {
+    const resolved = resolveAll(validLock(), {});
+    expect(resolved["d4rken-org/octi"]).toEqual({
       source: "d4rken-org/octi",
-      ref: LOCKED_REF,
+      ref: LOCKED_REF_A,
       manifestSha256: VALID_SHA256,
     });
   });
 
-  it("applies override + drops manifestSha256 when source matches", () => {
-    const overrides = { "d4rken-org/octi": ALT_SHA40 };
-    expect(resolveSource(LOCK, overrides)).toEqual({
+  it("applies an override and drops the manifestSha256 trust anchor", () => {
+    const resolved = resolveAll(validLock(), { "d4rken-org/octi": ALT_SHA40 });
+    expect(resolved["d4rken-org/octi"]).toEqual({
       source: "d4rken-org/octi",
       ref: ALT_SHA40,
       manifestSha256: null,
     });
   });
 
-  it("ignores override keys that don't match the lock's source", () => {
-    const overrides = { "some-other/repo": ALT_SHA40 };
-    expect(resolveSource(LOCK, overrides)).toEqual({
-      source: "d4rken-org/octi",
-      ref: LOCKED_REF,
-      manifestSha256: VALID_SHA256,
+  it("resolves each source independently in a multi-source lock", () => {
+    const lock = validLock({
+      "d4rken-org/octi": { ref: LOCKED_REF_A, manifest_sha256: VALID_SHA256 },
+      "d4rken-org/octi-desktop": { ref: LOCKED_REF_B, manifest_sha256: VALID_SHA256 },
     });
+    const resolved = resolveAll(lock, { "d4rken-org/octi-desktop": ALT_SHA40 });
+    expect(resolved["d4rken-org/octi"].ref).toBe(LOCKED_REF_A);
+    expect(resolved["d4rken-org/octi"].manifestSha256).toBe(VALID_SHA256);
+    expect(resolved["d4rken-org/octi-desktop"].ref).toBe(ALT_SHA40);
+    expect(resolved["d4rken-org/octi-desktop"].manifestSha256).toBeNull();
+  });
+
+  it("throws when override targets a source not present in the lock", () => {
+    // Workflow misconfiguration guard: an override for an allowlisted-but-not-yet-locked
+    // source must fail loudly, not silently fall back.
+    expect(() =>
+      resolveAll(validLock(), { "d4rken-org/octi-desktop": ALT_SHA40 }),
+    ).toThrow(/sources?\(s\)? not present in fixture-lock/);
   });
 });
 
-describe("resolveFromEnv", () => {
+describe("resolveAllFromEnv", () => {
   it("returns the locked source when env is empty", () => {
-    expect(resolveFromEnv(LOCK, {})).toEqual({
-      source: "d4rken-org/octi",
-      ref: LOCKED_REF,
-      manifestSha256: VALID_SHA256,
-    });
+    const resolved = resolveAllFromEnv(validLock(), {});
+    expect(resolved["d4rken-org/octi"].ref).toBe(LOCKED_REF_A);
+    expect(resolved["d4rken-org/octi"].manifestSha256).toBe(VALID_SHA256);
   });
 
   it("returns the override-resolved source when env has a matching override", () => {
-    // This is the regression test Codex flagged — the cache dir derived from
-    // this result MUST match the sync's write target so consumer reads find
-    // the override-cached files instead of stale locked-ref files.
     const env = {
       INTEROP_FIXTURE_OVERRIDES: JSON.stringify({ "d4rken-org/octi": ALT_SHA40 }),
     };
-    expect(resolveFromEnv(LOCK, env)).toEqual({
-      source: "d4rken-org/octi",
-      ref: ALT_SHA40,
-      manifestSha256: null,
-    });
+    const resolved = resolveAllFromEnv(validLock(), env);
+    expect(resolved["d4rken-org/octi"].ref).toBe(ALT_SHA40);
+    expect(resolved["d4rken-org/octi"].manifestSha256).toBeNull();
   });
 
   it("propagates parseOverrides failures (no silent fallback)", () => {
     expect(() =>
-      resolveFromEnv(LOCK, { INTEROP_FIXTURE_OVERRIDES: "not json" }),
+      resolveAllFromEnv(validLock(), { INTEROP_FIXTURE_OVERRIDES: "not json" }),
     ).toThrow(/not valid JSON/);
   });
 });
 
 describe("SOURCE_PATHS registry invariants", () => {
-  it("contains the current upstream", () => {
+  it("contains both producer entries", () => {
     expect(SOURCE_PATHS).toHaveProperty("d4rken-org/octi");
+    expect(SOURCE_PATHS).toHaveProperty("d4rken-org/octi-desktop");
   });
 
-  it("every value is a relative path containing 'interop'", () => {
+  it("every value is a relative path", () => {
     for (const [source, path] of Object.entries(SOURCE_PATHS)) {
       expect(path).not.toMatch(/^\//);
       expect(path).not.toMatch(/\.\./);
       expect(path.length).toBeGreaterThan(0);
-      expect(path).toContain("interop");
       expect(source).toMatch(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/);
     }
   });

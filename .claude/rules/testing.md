@@ -47,13 +47,18 @@ test that pins the format:
 - `crypto/payload.test.ts`, `crypto/streaming-aead.test.ts`, `crypto/tink-keyset.test.ts`
   — wire bytes vs Tink/Android fixtures fetched from
   [`d4rken-org/octi`](https://github.com/d4rken-org/octi) at the commit SHA pinned
-  in `fixture-lock.json`. The cache lives at `.cache/interop-fixtures/<sha>/`
-  (gitignored). `tools/sync-fixtures.ts` is wired as vitest `globalSetup`, so
-  any `pnpm test` invocation refreshes the cache before tests run; explicit
+  in `fixture-lock.json`. `tools/sync-fixtures.ts` is wired as vitest `globalSetup`,
+  so any `pnpm test` invocation refreshes the cache before tests run; explicit
   `pnpm fixtures:sync` does the same thing manually. Loader + materialization
   helpers live at [`src/__interop__/fixture-loader.ts`](../../src/__interop__/fixture-loader.ts).
   Regenerate fixtures upstream in app-main and bump the lockfile here — never
   edit cached files.
+- `__interop__/desktop-{meta,clipboard,files}.test.ts` — same idea pointing at
+  the second source. Fetched from
+  [`d4rken-org/octi-desktop`](https://github.com/d4rken-org/octi-desktop) at the
+  SHA pinned in `fixture-lock.json#sources["d4rken-org/octi-desktop"]`. Pins the
+  per-module wire shape octi-desktop emits (`SharedFile.blobKey` is a plain UUID
+  here, not `sha256:<hex>` like web/android).
 - `modules/<name>.test.ts` — backward-compat JSON for each module.
 - `linking/linking-data.test.ts` — gzip + base64 link payload.
 - `__interop__/published-self-check.test.ts` — pins what octi-web publishes
@@ -62,6 +67,26 @@ test that pins the format:
   `src/__interop__/published/{manifest, octi-web-{meta,clipboard,files}}.json`
   files are byte-equal to fresh output. Regenerate via `pnpm fixtures:generate`
   after touching `serializeXxxInfo` or the canonical inputs in the generator.
+
+### Multi-source `fixture-lock.json`
+
+Schema v2 — one entry per upstream producer. Cache laid out as
+`.cache/interop-fixtures/<owner>/<repo>/<sha>/` (gitignored). The parser also
+accepts the legacy v1 flat shape so a hand-edit revert during the migration
+window still parses.
+
+```json
+{
+  "schemaVersion": 2,
+  "sources": {
+    "d4rken-org/octi":         { "ref": "<sha40>", "manifest_sha256": "<sha256>" },
+    "d4rken-org/octi-desktop": { "ref": "<sha40>", "manifest_sha256": "<sha256>" }
+  }
+}
+```
+
+To bump one source, change its `ref` and recompute `manifest_sha256` via
+`sha256sum` on the manifest at that SHA. The other source stays anchored.
 
 When changing wire format intentionally, update the fixture in a dedicated
 commit so the diff is reviewable in isolation.
