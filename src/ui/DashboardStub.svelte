@@ -8,6 +8,7 @@
   import { startPollLoop } from "../sync/poll-loop";
   import { credentialsRepo, type CredentialRecord } from "../storage/credentials-repo";
   import { tileLayoutRepo } from "../storage/tile-layout-repo";
+  import { wipeLocalSyncData } from "../storage/wipe-all";
   import { OCTI_WEB_DISPLAY_VERSION } from "../version";
   import DeviceCard from "./dashboard/DeviceCard.svelte";
   import IssuesSummarySheet from "./dashboard/IssuesSummarySheet.svelte";
@@ -184,14 +185,17 @@
     ) {
       return;
     }
-    // Wipe credentials + tile layouts in parallel. IdentitySettings stays —
-    // matching Android's `SyncSettings.deviceId`, which persists across
-    // `removeAll`. Otherwise re-linking creates another "device" identity
-    // on the server, leaving stale records behind.
-    await Promise.all([
-      credentialsRepo.wipeAll().catch(() => undefined),
-      tileLayoutRepo.wipeAll().catch(() => undefined),
-    ]);
+    // `wipeLocalSyncData` is the single source of truth for what gets
+    // cleared on sign-out (credentials, tile layouts, pending file-share
+    // retries — see {@link wipeLocalSyncData}). Keeping the list in one
+    // place prevents future PRs adding new stores from accidentally
+    // omitting them here.
+    //
+    // IdentitySettings is intentionally NOT wiped — matching Android's
+    // `SyncSettings.deviceId`, which persists across `removeAll`. Otherwise
+    // re-linking creates another "device" identity on the server, leaving
+    // stale records behind.
+    await wipeLocalSyncData();
     onSignOut();
   }
 

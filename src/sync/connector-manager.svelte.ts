@@ -41,6 +41,13 @@ import {
   credentialsRepo,
 } from "../storage/credentials-repo";
 import { getOwnDeviceId } from "../storage/identity-settings";
+import {
+  fileShareRetryQueue,
+  MAX_ATTEMPTS as RETRY_MAX_ATTEMPTS,
+  PENDING_TTL_MS as RETRY_PENDING_TTL_MS,
+  type FileShareRetryQueue,
+  type PendingPublish,
+} from "./fileshare-retry-queue";
 
 /**
  * Orchestrates one or more {@link OctiServerConnector}s, runs the per-connector
@@ -118,6 +125,31 @@ export class ConnectorManager {
   #crypti = new Map<string, PayloadEncryption>();
   #blobCipher = new Map<string, BlobCipher>();
   #etagCache = new Map<string, EtagCache<unknown>>();
+  /**
+   * Per-connector serialization gate for {@link publishSharedFileEntry}
+   * calls. The publish path is read-modify-write against the connector's
+   * own-device `FileShareInfo` document with `If-Match` precondition —
+   * concurrent calls on the same connector race for the ETag and one
+   * gets 412. Common race: a user upload's phase 2 firing while a
+   * drained retry from the queue runs concurrently for the same
+   * connector. We chain calls per-connector via a promise tail so they
+   * serialize cleanly; different connectors stay independent.
+   */
+  #publishLocks = new Map<string, Promise<void>>();
+  /**
+   * Injectable retry queue. Defaults to the module-level singleton; tests
+   * can substitute a fresh instance to avoid cross-test state on the
+   * shared IDB DB. See {@link __setRetryQueueForTest}.
+   */
+  #retryQueue: FileShareRetryQueue = fileShareRetryQueue;
+  /**
+   * Single-flight guard for {@link #drainRetryQueue}. Concurrent drains
+   * could double-process the same entry (one succeeds + deletes; the
+   * other writes back stale state) since the per-connector publish lock
+   * only serializes the network calls, not the queue's read-modify-write
+   * row updates. Overlapping drains coalesce into one.
+   */
+  #drainInFlight: Promise<void> | null = null;
 
   // ─── Generation guards ───────────────────────────────────────
   #refreshSeq = 0;
@@ -176,6 +208,12 @@ export class ConnectorManager {
     this.#crypti.delete(connectorId);
     this.#blobCipher.delete(connectorId);
     this.#etagCache.delete(connectorId);
+    // Prune the retry queue. Pending entries referencing only this
+    // connector are dropped; entries with other targets keep going. We
+    // swallow errors so a failed prune doesn't block the removal — the
+    // queue is best-effort and a stale connectorId there is harmless
+    // (drain will look it up in `this.connectors`, miss, and move on).
+    await this.#retryQueue.pruneConnector(connectorId).catch(() => undefined);
     await credentialsRepo.deleteByConnectorId(connectorId);
     await this.#syncConnectorsSerialized();
   }
@@ -266,6 +304,44 @@ export class ConnectorManager {
   }
 
   /**
+   * Serialize `fn` against any other publish currently running on the same
+   * connector. The publish path
+   * ({@code publishSharedFileEntry → readModulePayloadWithEtag + commitModule})
+   * is read-modify-write with `If-Match` — concurrent callers on the same
+   * connector both read the same ETag, one wins, the other gets 412.
+   * Common collision: phase 2 of `uploadFile` firing while
+   * `drainRetryQueue` retries a prior pending publish on the same
+   * connector. We avoid the 412 by chaining each new caller behind the
+   * previous on a per-connector promise tail.
+   *
+   * Errors thrown by `fn` propagate to that caller only — subsequent
+   * waiters always proceed.
+   */
+  async #runUnderPublishLock<T>(
+    connectorId: string,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const prior = this.#publishLocks.get(connectorId) ?? Promise.resolve();
+    let resolveTail!: () => void;
+    const newTail = new Promise<void>((r) => {
+      resolveTail = r;
+    });
+    this.#publishLocks.set(connectorId, newTail);
+    try {
+      await prior; // wait for any prior publish on this connector
+      return await fn();
+    } finally {
+      resolveTail();
+      // If nothing else chained behind us, drop the map entry so an idle
+      // map doesn't accumulate per-connector slots over the lifetime of
+      // the manager.
+      if (this.#publishLocks.get(connectorId) === newTail) {
+        this.#publishLocks.delete(connectorId);
+      }
+    }
+  }
+
+  /**
    * Invalidate every in-flight refresh signal for one connector — used on
    * teardown (`removeConnector`, `#syncConnectorsFromRecords` when a
    * credential is gone). Bumps both:
@@ -324,6 +400,15 @@ export class ConnectorManager {
       if (results.length > 0 && results.every((r) => r === "ok")) {
         this.lastSuccessAt = now;
       }
+      // Drain pending file-share publishes after the refresh writes settle.
+      // We run this on every `refreshAll` regardless of pass-level success —
+      // a retry attempt isn't tied to "every connector succeeded this tick",
+      // and `drainRetryQueue` handles per-connector failures internally.
+      // Errors are swallowed so drain blowups don't crash the refresh loop;
+      // surfacing happens via `lastError` on the affected connectors.
+      await this.#drainRetryQueue().catch((e) => {
+        console.warn("[ConnectorManager] retry-queue drain failed", e);
+      });
     } finally {
       this.#endRefreshPass();
     }
@@ -620,35 +705,244 @@ export class ConnectorManager {
     // Phase 2: fan-out FileShareInfo publish (only to connectors whose blob
     // upload succeeded; publishing on a connector whose blob is missing
     // would leave a dangling `connectorRefs` entry).
-    const publishResults = await Promise.allSettled(
-      uploads.map(async ({ connectorId }) => {
-        const c = this.connectors.find((c) => c.connectorId === connectorId);
-        if (!c) throw new Error(`Connector ${connectorId} disappeared during publish`);
-        const crypti = this.#crypti.get(connectorId);
-        if (!crypti) throw new Error(`Crypto missing for ${connectorId}`);
-        try {
-          await publishSharedFileEntry({ connector: c, crypti, shared });
-        } catch (e) {
-          this.#recordPublishError(connectorId, "FileShareInfo", e);
-          throw e;
-        }
-      }),
-    );
+    //
+    // Each publish is serialized per-connector against any concurrent retry
+    // drain via {@link #runUnderPublishLock} — both paths read-modify-write
+    // the same FileShareInfo document with `If-Match`, so without the lock
+    // they'd race the ETag and one would 412.
+    //
+    // Disconnect-during-lock-wait: re-resolving `this.connectors.find()`
+    // INSIDE the locked block matters. If a `removeConnector` runs while
+    // we're queued behind another publish, the connector is gone by the
+    // time we'd actually publish — we'd talk to a torn-down `crypti`
+    // (cleared by `removeConnector`) AND enqueue a retry for an id that
+    // pruneConnector has already swept. The pattern below resolves both
+    // by checking after the lock and returning `"skipped"` so the caller
+    // doesn't count it toward success or failure.
+    const publishResults: PromiseSettledResult<"published" | "skipped">[] =
+      await Promise.allSettled(
+        uploads.map(({ connectorId }) =>
+          this.#runUnderPublishLock(connectorId, async (): Promise<"published" | "skipped"> => {
+            const c = this.connectors.find((c) => c.connectorId === connectorId);
+            if (!c) return "skipped";
+            const crypti = this.#crypti.get(connectorId);
+            if (!crypti) return "skipped";
+            try {
+              await publishSharedFileEntry({ connector: c, crypti, shared });
+              return "published";
+            } catch (e) {
+              this.#recordPublishError(connectorId, "FileShareInfo", e);
+              throw e;
+            }
+          }),
+        ),
+      );
 
-    const publishOK = publishResults.filter((r) => r.status === "fulfilled").length;
-    if (publishOK === 0) {
-      // Blobs may have landed on the servers but no FileShareInfo document
-      // references them, so peers won't see the file and the server's GC
-      // will eventually drop the orphans. Reject so the dashboard's "Shared"
-      // status doesn't lie.
+    // Classify outcomes. Only true rejections (publish threw) go in
+    // `failedConnectorIds` for enqueue — skipped means the connector was
+    // gone before we could publish, and re-adding it later wouldn't
+    // auto-recover this entry anyway, so a queue row would just dangle.
+    let successCount = 0;
+    const failedConnectorIds: string[] = [];
+    publishResults.forEach((r, i) => {
+      const connectorId = uploads[i].connectorId;
+      if (r.status === "rejected") {
+        failedConnectorIds.push(connectorId);
+      } else if (r.value === "published") {
+        successCount++;
+      }
+      // r.value === "skipped" — neither success nor failure; ignore.
+    });
+
+    // Track whether we actually persisted the retry to IDB so the throw
+    // message below doesn't lie ("queued for retry") when enqueue itself
+    // failed.
+    let retryPersisted = false;
+    if (failedConnectorIds.length > 0) {
+      try {
+        const { evicted } = await this.#retryQueue.enqueue({
+          shared,
+          pendingConnectorIds: failedConnectorIds,
+        });
+        retryPersisted = true;
+        for (const ev of evicted) {
+          this.#recordRetryDrop(ev, "queue full — older entry evicted");
+        }
+      } catch (e) {
+        console.warn("[ConnectorManager] enqueue retry failed", e);
+        // Surface a per-connector issue so the user knows nothing is
+        // coming back automatically — they need to re-upload.
+        for (const id of failedConnectorIds) {
+          this.#recordPublishError(
+            id,
+            "FileShareInfo retry",
+            new Error("Could not queue retry locally"),
+          );
+        }
+      }
+    }
+
+    // Two distinct failure modes for "nothing was published":
+    //   1. Every phase-2 attempt rejected → some blobs landed but no doc
+    //      references them. The retry queue (if persisted) redrives this
+    //      on the next refresh tick.
+    //   2. Every phase-2 target was skipped because every connector
+    //      disconnected between phase 1 and phase 2 → blobs are dangling
+    //      and won't be auto-recovered (we don't enqueue skipped ones).
+    //      User must re-upload after re-linking.
+    if (successCount === 0) {
       const firstErr = publishResults.find((r) => r.status === "rejected") as
         | PromiseRejectedResult
         | undefined;
-      throw new Error(
-        `File share publish failed on every connector: ${firstErr ? firstErr.reason : "unknown"}`,
-      );
+      const message = firstErr
+        ? `File share publish failed on every connector: ${firstErr.reason}${
+            retryPersisted ? " (queued for retry)" : ""
+          }`
+        : `File "${file.name}" couldn't be shared — every sync source disconnected before metadata publish`;
+      throw new Error(message);
     }
     return { shared };
+  }
+
+  // ─── File-share retry drain ─────────────────────────────────
+  /**
+   * Walk the file-share retry queue and reattempt each pending publish on
+   * its remaining target connectors. Called from {@link refreshAll} at the
+   * end of every pass so retries piggyback on the existing poll cadence.
+   *
+   * For each entry:
+   *   - If older than {@link RETRY_PENDING_TTL_MS}: drop. The sync-server's
+   *     unlinked-blob TTL is 10 minutes; past our 8-minute safety window,
+   *     a successful publish might point at an already-GC'd blob. Surface
+   *     an issue and let the user re-upload.
+   *   - Otherwise for each `pendingConnectorId` still in `this.connectors`:
+   *     publish under the per-connector lock. On success, drop the id from
+   *     `pendingConnectorIds`. On failure, leave it for the next pass.
+   *   - Increment `attempts` and update `lastAttemptAt` once per entry.
+   *   - If `pendingConnectorIds` empties: delete the entry.
+   *   - If `attempts` hits {@link RETRY_MAX_ATTEMPTS}: drop and surface an
+   *     issue per remaining connector.
+   *
+   * Disconnected connectors in `pendingConnectorIds` are silently skipped
+   * by drain (no publish attempted, no attempts increment for them
+   * specifically) — `removeConnector` already calls
+   * {@code retryQueue.pruneConnector(id)}, so seeing one here would only
+   * be a pruneConnector race. They get cleaned up on the next remove or
+   * the entry's TTL.
+   */
+  async #drainRetryQueue(): Promise<void> {
+    // Single-flight: overlapping `refreshAll()` calls share one drain.
+    // Without this, two parallel drains both `list()` the snapshot, both
+    // try to publish, and the one that finishes second can resurrect a
+    // queue entry the first already deleted — the per-connector publish
+    // lock only covers the network call, not the IDB row R-M-W.
+    if (this.#drainInFlight) return this.#drainInFlight;
+    const job = this.#drainRetryQueueInner();
+    this.#drainInFlight = job;
+    try {
+      await job;
+    } finally {
+      if (this.#drainInFlight === job) this.#drainInFlight = null;
+    }
+  }
+
+  async #drainRetryQueueInner(): Promise<void> {
+    const all = await this.#retryQueue.list().catch(() => [] as PendingPublish[]);
+    if (all.length === 0) return;
+
+    const now = Date.now();
+    // Process entries in parallel — each entry's publishes are already
+    // serialized per-connector by the publish lock, and different entries
+    // targeting the same connector serialize transparently through that
+    // same lock. So parallel here is safe and faster.
+    await Promise.all(
+      all.map(async (entry) => {
+        // TTL: drop expired entries before we attempt them. The blob they
+        // reference may already be GC'd on the server side.
+        if (now - entry.createdAt > RETRY_PENDING_TTL_MS) {
+          await this.#retryQueue.delete(entry.id).catch(() => undefined);
+          this.#recordRetryDrop(entry, "expired before all sync sources accepted");
+          return;
+        }
+
+        const remaining: string[] = [];
+        for (const connectorId of entry.pendingConnectorIds) {
+          // We re-resolve connector + crypto inside the lock below.
+          // Checking them OUTSIDE the lock is just a fast-path
+          // optimisation — if the connector is already gone before we
+          // queue up, skip the lock entirely.
+          if (!this.connectors.some((c) => c.connectorId === connectorId)) {
+            continue;
+          }
+          try {
+            const outcome = await this.#runUnderPublishLock(
+              connectorId,
+              async (): Promise<"published" | "skipped"> => {
+                // Re-check after acquiring the lock. A `removeConnector`
+                // racing with us would have cleared crypti by the time
+                // we'd publish; without this check we'd talk to a torn-
+                // down crypti and either crash or write to a connector
+                // the user just disconnected.
+                const connector = this.connectors.find((c) => c.connectorId === connectorId);
+                if (!connector) return "skipped";
+                const crypti = this.#crypti.get(connectorId);
+                if (!crypti) return "skipped";
+                await publishSharedFileEntry({ connector, crypti, shared: entry.shared });
+                return "published";
+              },
+            );
+            if (outcome === "skipped") {
+              // Connector vanished mid-attempt — drop it from this
+              // entry's pending list (matches removeConnector's prune).
+              continue;
+            }
+          } catch (e) {
+            // Still failing on this connector; keep it for the next drain.
+            remaining.push(connectorId);
+            this.#recordPublishError(connectorId, "FileShareInfo retry", e);
+          }
+        }
+
+        const nextAttempts = entry.attempts + 1;
+        if (remaining.length === 0) {
+          // Every target succeeded (or vanished) — entry is done.
+          await this.#retryQueue.delete(entry.id).catch(() => undefined);
+          return;
+        }
+        if (nextAttempts >= RETRY_MAX_ATTEMPTS) {
+          await this.#retryQueue.delete(entry.id).catch(() => undefined);
+          this.#recordRetryDrop(
+            { ...entry, pendingConnectorIds: remaining },
+            `gave up after ${RETRY_MAX_ATTEMPTS} attempts`,
+          );
+          return;
+        }
+        await this.#retryQueue
+          .update({
+            ...entry,
+            pendingConnectorIds: remaining,
+            attempts: nextAttempts,
+            lastAttemptAt: now,
+          })
+          .catch(() => undefined);
+      }),
+    );
+  }
+
+  /**
+   * Surface a one-shot issue for each connector affected by a dropped
+   * retry entry (TTL expiry, queue cap eviction, or attempts cap). Writes
+   * via {@link #recordPublishError}'s normal channel so the issue appears
+   * in {@link mergedIssues} alongside other connector errors.
+   */
+  #recordRetryDrop(entry: PendingPublish, reason: string): void {
+    for (const connectorId of entry.pendingConnectorIds) {
+      this.#recordPublishError(
+        connectorId,
+        "FileShareInfo retry",
+        new Error(`File "${entry.shared.name}" ${reason}`),
+      );
+    }
   }
 
   /**
@@ -713,6 +1007,16 @@ export class ConnectorManager {
         this.#etagCache.set(c.connectorId, createEtagCache<unknown>());
       }
     }
+  }
+
+  /**
+   * Swap the retry queue. Lets tests inject a fresh instance so cases that
+   * exercise enqueue / drain don't share state on the module-level
+   * singleton's IDB database — vitest can run tests in parallel and
+   * cross-test bleed there would be its own debugging hell.
+   */
+  __setRetryQueueForTest(q: FileShareRetryQueue): void {
+    this.#retryQueue = q;
   }
 }
 
