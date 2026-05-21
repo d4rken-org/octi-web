@@ -65,32 +65,44 @@ jobs:
           - 18080:8080
         env:
           OCTI_CORS_ALLOWED_ORIGINS: 'http://127.0.0.1:5173,http://localhost:5173'
+      sync-server-b:
+        image: ghcr.io/d4rken-org/octi-server@sha256:3829efba5ca5a4d407a0d0a048b8d0c20264ad2f9e389aa087c857ea0d0bddaa
+        ports:
+          - 18081:8080
+        env:
+          OCTI_CORS_ALLOWED_ORIGINS: 'http://127.0.0.1:5173,http://localhost:5173'
     steps:
       - name: Checkout source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with: { persist-credentials: false }
       - name: Setup environment
         uses: ./.github/actions/common-setup
-      - name: Wait for sync-server
+      - name: Wait for sync-servers
         run: |
           set -euo pipefail
-          for attempt in $(seq 1 30); do
-            if curl -sf http://127.0.0.1:18080/v1/status > /dev/null; then
-              echo "sync-server up after ${attempt}s"
-              exit 0
-            fi
-            sleep 1
+          for port in 18080 18081; do
+            for attempt in $(seq 1 30); do
+              if curl -sf "http://127.0.0.1:${port}/v1/status" > /dev/null; then
+                echo "sync-server on ${port} up after ${attempt}s"
+                continue 2
+              fi
+              sleep 1
+            done
+            echo "sync-server on ${port} did not respond within 30s" >&2
+            docker logs ${{ job.services.sync-server.id }} || true
+            docker logs ${{ job.services['sync-server-b'].id }} || true
+            exit 1
           done
-          echo "sync-server did not respond within 30s" >&2
-          docker logs ${{ job.services.sync-server.id }} || true
-          exit 1
       - name: Run smoke suite
         env:
           SMOKE_SERVER_URL: http://127.0.0.1:18080
+          SMOKE_SERVER_B_URL: http://127.0.0.1:18081
         run: pnpm test:smoke
       - name: Dump sync-server logs on failure
         if: failure()
-        run: docker logs ${{ job.services.sync-server.id }} || true
+        run: |
+          docker logs ${{ job.services.sync-server.id }} || true
+          docker logs ${{ job.services['sync-server-b'].id }} || true
 
   release-tooling:
     name: Release tooling
