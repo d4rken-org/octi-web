@@ -34,6 +34,7 @@
   const deviceCount = $derived(state?.devices.size ?? 0);
   const lastError = $derived(state?.lastError ?? null);
   const lastRefreshedAt = $derived(state?.lastRefreshedAt ?? null);
+  const refreshing = $derived(state?.refreshing ?? false);
 
   // Coarse "x min ago" for the status row. Doesn't need second-level
   // precision because this card is rendered inside a Sheet that's only
@@ -72,13 +73,21 @@
   </div>
 
   <div class="actions">
-    <!--
-      "Refresh all" because today the ConnectorManager only exposes a
-      global `refreshAll()` — there's no per-connector refresh yet. Naming
-      it "Refresh" on a per-row button would be misleading. Per-connector
-      refresh is a follow-up (manager.refreshOne(connectorId)).
-    -->
-    <button type="button" class="action" onclick={onRefresh}>Refresh all</button>
+    <button
+      type="button"
+      class="action"
+      onclick={onRefresh}
+      disabled={refreshing}
+      data-testid="connector-refresh"
+      aria-busy={refreshing}
+    >
+      {#if refreshing}
+        <span class="spinner" aria-hidden="true"></span>
+        Refreshing…
+      {:else}
+        Refresh
+      {/if}
+    </button>
     <button
       type="button"
       class="action"
@@ -175,9 +184,40 @@
     color: var(--md-color-on-surface);
     font-size: 0.82rem;
     cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
   }
-  .action:hover {
+  .action:hover:not(:disabled) {
     background: color-mix(in srgb, var(--md-color-on-surface) 8%, transparent);
+  }
+  .action:disabled {
+    opacity: 0.65;
+    cursor: progress;
+  }
+  /*
+   * Inline spinner inside the Refresh button. Honors prefers-reduced-motion
+   * by switching to a static dot so screenshot CI doesn't capture a
+   * mid-rotation frame.
+   */
+  .spinner {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    border: 2px solid color-mix(in srgb, var(--md-color-on-surface) 40%, transparent);
+    border-top-color: var(--md-color-on-surface);
+    animation: connector-card-spin 0.8s linear infinite;
+    display: inline-block;
+    flex-shrink: 0;
+  }
+  @keyframes connector-card-spin {
+    to { transform: rotate(360deg); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .spinner {
+      animation: none;
+      border-top-color: color-mix(in srgb, var(--md-color-on-surface) 40%, transparent);
+    }
   }
   .action.destructive {
     color: var(--md-color-error);

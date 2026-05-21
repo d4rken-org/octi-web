@@ -61,6 +61,22 @@ function makeConnectorRefreshState(
     lastError: null,
     lastRefreshedAt: new Date(),
     lastSuccessAt: new Date(),
+    refreshing: false,
+  };
+}
+
+/**
+ * Idle (non-refreshing, never-refreshed) per-connector state. Convenience
+ * factory used as a baseline seed in tests that focus on a path other than
+ * the refresh lifecycle itself (publish fan-out, file upload).
+ */
+function idleState(): ConnectorRefreshState {
+  return {
+    devices: new Map(),
+    lastError: null,
+    lastRefreshedAt: null,
+    lastSuccessAt: null,
+    refreshing: false,
   };
 }
 
@@ -288,7 +304,7 @@ describe("ConnectorManager.refreshAll generation guard", () => {
       crypti: new Map([["connA", makeStubCrypti()]]),
     });
     manager.perConnectorState = new Map([
-      ["connA", { devices: new Map(), lastError: null, lastRefreshedAt: null, lastSuccessAt: null }],
+      ["connA", idleState()],
     ]);
 
     // Start refresh 1 (slow). Its #refreshOne suspends inside listDevices.
@@ -328,8 +344,8 @@ describe("ConnectorManager.refreshAll generation guard", () => {
       ]),
     });
     manager.perConnectorState = new Map([
-      ["connA", { devices: new Map(), lastError: null, lastRefreshedAt: null, lastSuccessAt: null }],
-      ["connB", { devices: new Map(), lastError: null, lastRefreshedAt: null, lastSuccessAt: null }],
+      ["connA", idleState()],
+      ["connB", idleState()],
     ]);
 
     await manager.refreshAll();
@@ -367,11 +383,11 @@ describe("ConnectorManager.publishOwnMetaInfo fan-out", () => {
     manager.perConnectorState = new Map([
       [
         "connA",
-        { devices: new Map(), lastError: null, lastRefreshedAt: null, lastSuccessAt: null },
+        idleState(),
       ],
       [
         "connB",
-        { devices: new Map(), lastError: null, lastRefreshedAt: null, lastSuccessAt: null },
+        idleState(),
       ],
     ]);
 
@@ -422,8 +438,8 @@ describe("ConnectorManager.uploadFile fan-out", () => {
       ]),
     });
     manager.perConnectorState = new Map([
-      ["connA", { devices: new Map(), lastError: null, lastRefreshedAt: null, lastSuccessAt: null }],
-      ["connB", { devices: new Map(), lastError: null, lastRefreshedAt: null, lastSuccessAt: null }],
+      ["connA", idleState()],
+      ["connB", idleState()],
     ]);
 
     const file = new File([new Uint8Array([1, 2, 3])], "x.bin", { type: "application/octet-stream" });
@@ -471,8 +487,8 @@ describe("ConnectorManager.uploadFile fan-out", () => {
       ]),
     });
     manager.perConnectorState = new Map([
-      ["connA", { devices: new Map(), lastError: null, lastRefreshedAt: null, lastSuccessAt: null }],
-      ["connB", { devices: new Map(), lastError: null, lastRefreshedAt: null, lastSuccessAt: null }],
+      ["connA", idleState()],
+      ["connB", idleState()],
     ]);
 
     const file = new File([new Uint8Array([9, 9])], "y.bin", { type: "application/octet-stream" });
@@ -481,5 +497,287 @@ describe("ConnectorManager.uploadFile fan-out", () => {
     expect(result.shared.availableOn).toEqual(["connB"]);
     expect(result.shared.connectorRefs).toEqual({ connB: "blob-B" });
     expect(manager.perConnectorState.get("connA")?.lastError).toMatch(/quota exceeded/);
+  });
+});
+
+// ─── refreshOne (per-connector refresh) ─────────────────────────
+//
+// These tests exercise the new public `refreshOne(connectorId)` method and
+// its interactions with `refreshAll`: per-connector spinner gating, race
+// semantics, and the derived `loading` flag.
+
+/**
+ * Build a fake DeviceMetadata pinned to a given id. The `addedAt`/`lastSeen`
+ * fields are required by the type but irrelevant to refresh-path tests.
+ */
+function makePeer(id: string): DeviceMetadata {
+  return {
+    id,
+    label: id,
+    platform: "android",
+    version: "v",
+    addedAt: null,
+    lastSeen: null,
+  } as unknown as DeviceMetadata;
+}
+
+describe("ConnectorManager.refreshOne", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("writes only the targeted connector's state", async () => {
+    const listA = vi.fn(async () => [makePeer("peer-A")]);
+    const listB = vi.fn(async () => [makePeer("peer-B")]);
+    const cA = makeMockConnector("connA");
+    const cB = makeMockConnector("connB");
+    (cA as unknown as { listDevices: typeof listA }).listDevices = listA;
+    (cB as unknown as { listDevices: typeof listB }).listDevices = listB;
+
+    const manager = new ConnectorManager();
+    manager.__setConnectorsForTest({
+      connectors: [cA, cB],
+      crypti: new Map([
+        ["connA", makeStubCrypti()],
+        ["connB", makeStubCrypti()],
+      ]),
+    });
+    manager.perConnectorState = new Map([
+      ["connA", idleState()],
+      ["connB", idleState()],
+    ]);
+
+    await manager.refreshOne("connA");
+
+    expect(listA).toHaveBeenCalledTimes(1);
+    expect(listB).not.toHaveBeenCalled();
+    expect(manager.perConnectorState.get("connA")?.devices.size).toBe(1);
+    expect(manager.perConnectorState.get("connB")?.devices.size).toBe(0);
+  });
+
+  it("clears `refreshing` on the targeted connector when it completes", async () => {
+    const cA = makeMockConnector("connA");
+    const manager = new ConnectorManager();
+    manager.__setConnectorsForTest({
+      connectors: [cA],
+      crypti: new Map([["connA", makeStubCrypti()]]),
+    });
+    manager.perConnectorState = new Map([["connA", idleState()]]);
+
+    await manager.refreshOne("connA");
+
+    expect(manager.perConnectorState.get("connA")?.refreshing).toBe(false);
+  });
+
+  it("a stale (older) refreshOne completion does NOT clear a newer pass's spinner", async () => {
+    // Token-gate test (Codex called this out): the previous draft of this
+    // test had the newer pass already complete by the time the older pass
+    // resolved, so the older pass returned via `isStale()` BEFORE reaching
+    // the success/error `refreshing = token !== myToken` assignment — the
+    // gate was never exercised.
+    //
+    // The model here: pass 1 stalls on listDevices, pass 2 ALSO stalls on
+    // listDevices, then pass 1 resolves FIRST while pass 2 is still
+    // suspended. Pass 1's success-write tries to clear `refreshing`, but
+    // the token gate must keep it true because pass 2 owns the token now.
+    let resolveFirst: (devs: DeviceMetadata[]) => void = () => {};
+    let resolveSecond: (devs: DeviceMetadata[]) => void = () => {};
+    const firstList = new Promise<DeviceMetadata[]>((r) => {
+      resolveFirst = r;
+    });
+    const secondList = new Promise<DeviceMetadata[]>((r) => {
+      resolveSecond = r;
+    });
+    const listFn = vi
+      .fn<() => Promise<DeviceMetadata[]>>()
+      .mockImplementationOnce(() => firstList)
+      .mockImplementationOnce(() => secondList);
+    const cA = makeMockConnector("connA");
+    (cA as unknown as { listDevices: typeof listFn }).listDevices = listFn;
+
+    const manager = new ConnectorManager();
+    manager.__setConnectorsForTest({
+      connectors: [cA],
+      crypti: new Map([["connA", makeStubCrypti()]]),
+    });
+    manager.perConnectorState = new Map([["connA", idleState()]]);
+
+    // Pass 1 starts, sets refreshing=true (token=1), suspends.
+    const p1 = manager.refreshOne("connA");
+    await Promise.resolve();
+    expect(manager.perConnectorState.get("connA")?.refreshing).toBe(true);
+
+    // Pass 2 starts, bumps the spinner token (now =2), sets refreshing=true
+    // (already true), suspends.
+    const p2 = manager.refreshOne("connA");
+    await Promise.resolve();
+
+    // Pass 1 resolves with its (now-stale) data. Its success path's
+    // `isStale()` is false (the global #refreshSeq didn't move), so it
+    // would try to write. The per-connector seq DID move (pass 2 bumped
+    // it), so `isStale()` IS true → pass 1 returns "stale" before the
+    // write. Same end result: spinner stays true, pass 2 still owns it.
+    //
+    // Note: this dual-path coverage is important. The test name says "token
+    // gate" but in the per-connector seq race, the seq guard fires first.
+    // To actually exercise the token clear-gate we'd need a write path that
+    // bypasses isStale — which doesn't exist for the per-connector races.
+    // The seq guard is the primary defense; the token gate is belt-and-
+    // braces for paths where the seq guard might be wrong (e.g. a future
+    // change to the staling rules). Both contribute to "older completion
+    // can't disturb newer pass's spinner" — which is the invariant we test.
+    resolveFirst([makePeer("peer-FIRST-stale")]);
+    await p1;
+    expect(manager.perConnectorState.get("connA")?.refreshing).toBe(true);
+
+    // Pass 2 resolves: success path writes data and clears refreshing
+    // because the token still matches.
+    resolveSecond([makePeer("peer-second")]);
+    await p2;
+    expect(manager.perConnectorState.get("connA")?.devices.size).toBe(1);
+    expect(manager.mergedDevices[0]?.raw.id).toBe("peer-second");
+    expect(manager.perConnectorState.get("connA")?.refreshing).toBe(false);
+  });
+
+  it("refreshOne(A) completion during active refreshAll does NOT clear refreshAll's spinner", async () => {
+    // Reverse race (Codex called this out): the existing "refreshAll
+    // during refreshOne" test covers one direction. This is the mirror:
+    // refreshOne(A) starts and suspends; refreshAll() starts, its leg for
+    // A suspends; the original refreshOne resolves first; we then assert
+    // A.refreshing stays true until refreshAll's leg finishes.
+    let resolveOne: (devs: DeviceMetadata[]) => void = () => {};
+    let resolveAll: (devs: DeviceMetadata[]) => void = () => {};
+    const oneList = new Promise<DeviceMetadata[]>((r) => {
+      resolveOne = r;
+    });
+    const allList = new Promise<DeviceMetadata[]>((r) => {
+      resolveAll = r;
+    });
+    const listFn = vi
+      .fn<() => Promise<DeviceMetadata[]>>()
+      // refreshOne's call (first)
+      .mockImplementationOnce(() => oneList)
+      // refreshAll's call (second)
+      .mockImplementationOnce(() => allList);
+    const cA = makeMockConnector("connA");
+    (cA as unknown as { listDevices: typeof listFn }).listDevices = listFn;
+
+    const manager = new ConnectorManager();
+    manager.__setConnectorsForTest({
+      connectors: [cA],
+      crypti: new Map([["connA", makeStubCrypti()]]),
+    });
+    manager.perConnectorState = new Map([["connA", idleState()]]);
+
+    const pOne = manager.refreshOne("connA");
+    await Promise.resolve();
+    expect(manager.perConnectorState.get("connA")?.refreshing).toBe(true);
+
+    // refreshAll bumps the global #refreshSeq AND (via #refreshOne) the
+    // per-connector spinner token. The original refreshOne's later
+    // completion will see both bumps via `isStale()` (global seq mismatch).
+    const pAll = manager.refreshAll();
+    await Promise.resolve();
+    expect(manager.perConnectorState.get("connA")?.refreshing).toBe(true);
+
+    // refreshOne resolves first — stale. Spinner must stay true (refreshAll's
+    // leg is still in flight).
+    resolveOne([makePeer("peer-one")]);
+    await pOne;
+    expect(manager.perConnectorState.get("connA")?.refreshing).toBe(true);
+
+    // refreshAll's leg lands: writes data, clears spinner.
+    resolveAll([makePeer("peer-all")]);
+    await pAll;
+    expect(manager.perConnectorState.get("connA")?.refreshing).toBe(false);
+    expect(manager.mergedDevices[0]?.raw.id).toBe("peer-all");
+  });
+
+  it("refreshAll() staled by refreshOne(A) does NOT advance lastSuccessAt", async () => {
+    // Single connector. refreshAll fires first (slow listDevices); refreshOne
+    // bumps the per-connector seq and runs to completion; refreshAll's leg
+    // for A returns "stale" on completion → not "ok" → lastSuccessAt should
+    // remain null.
+    let resolveAllList: (devs: DeviceMetadata[]) => void = () => {};
+    const slowList = new Promise<DeviceMetadata[]>((r) => {
+      resolveAllList = r;
+    });
+    const listFn = vi
+      .fn<() => Promise<DeviceMetadata[]>>()
+      // refreshAll's call
+      .mockImplementationOnce(() => slowList)
+      // refreshOne's call
+      .mockImplementationOnce(async () => [makePeer("peer-one")]);
+    const cA = makeMockConnector("connA");
+    (cA as unknown as { listDevices: typeof listFn }).listDevices = listFn;
+
+    const manager = new ConnectorManager();
+    manager.__setConnectorsForTest({
+      connectors: [cA],
+      crypti: new Map([["connA", makeStubCrypti()]]),
+    });
+    manager.perConnectorState = new Map([["connA", idleState()]]);
+
+    const rAll = manager.refreshAll();
+    // While refreshAll's leg is suspended, run a per-connector refresh on A.
+    await manager.refreshOne("connA");
+    // refreshAll's leg for A is now staled — when it finishes it returns
+    // "stale" and refuses to write. lastSuccessAt remains null because the
+    // pass didn't get an all-"ok" outcome.
+    resolveAllList([]);
+    await rAll;
+
+    expect(manager.lastSuccessAt).toBeNull();
+    // refreshOne's data is still in place.
+    expect(manager.perConnectorState.get("connA")?.devices.size).toBe(1);
+    expect(manager.mergedDevices[0]?.raw.id).toBe("peer-one");
+  });
+
+  it("`loading` is true while refreshOne is in flight, then false", async () => {
+    // The derived `loading` flag should reactively pick up the per-connector
+    // `refreshing` flag. We assert at three points: before, during, after.
+    let resolveList: (devs: DeviceMetadata[]) => void = () => {};
+    const slowList = new Promise<DeviceMetadata[]>((r) => {
+      resolveList = r;
+    });
+    const cA = makeMockConnector("connA");
+    (cA as unknown as { listDevices: () => Promise<DeviceMetadata[]> }).listDevices = () => slowList;
+
+    const manager = new ConnectorManager();
+    manager.__setConnectorsForTest({
+      connectors: [cA],
+      crypti: new Map([["connA", makeStubCrypti()]]),
+    });
+    manager.perConnectorState = new Map([["connA", idleState()]]);
+
+    expect(manager.loading).toBe(false);
+
+    const p = manager.refreshOne("connA");
+    // The `refreshing` flag is set synchronously inside `#refreshOne` before
+    // the first `await`, so by the time we check after a microtask, loading
+    // is true.
+    await Promise.resolve();
+    expect(manager.loading).toBe(true);
+    expect(manager.perConnectorState.get("connA")?.refreshing).toBe(true);
+
+    resolveList([]);
+    await p;
+    expect(manager.loading).toBe(false);
+    expect(manager.perConnectorState.get("connA")?.refreshing).toBe(false);
+  });
+
+  it("refreshOne on a removed connector is a no-op (does not throw)", async () => {
+    const cA = makeMockConnector("connA");
+    const manager = new ConnectorManager();
+    manager.__setConnectorsForTest({
+      connectors: [cA],
+      crypti: new Map([["connA", makeStubCrypti()]]),
+    });
+    manager.perConnectorState = new Map([["connA", idleState()]]);
+
+    // Simulate a removed connector by clearing the list.
+    manager.__setConnectorsForTest({ connectors: [], crypti: new Map() });
+    // Should not throw, should not write anywhere.
+    await expect(manager.refreshOne("connA")).resolves.toBeUndefined();
   });
 });
