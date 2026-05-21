@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "source": "d4rken-org/octi-web",
+  "generator": "tools/generate-fixtures.ts",
+  "files": {
+    "octi-web-clipboard.json": {
+      "sha256": "37efc9df5e13331f36860e9e2b3e8d708876b805881926f59451ef11fb4a0dc4",
+      "byteLength": 941
+    },
+    "octi-web-files.json": {
+      "sha256": "d66e1bdd04e0e9d9c259bd11b857611ba49983285d0f90938d77c6f297aa4e2d",
+      "byteLength": 5154
+    },
+    "octi-web-meta.json": {
+      "sha256": "99c20cac5d3f7f6448a091d192ed792488ca4b9a9eddc679df87f66fe5f37af3",
+      "byteLength": 1652
+    }
+  }
+}
