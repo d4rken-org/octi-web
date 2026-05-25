@@ -16,16 +16,24 @@ export interface BootstrapPeer {
   deviceId: string;
 }
 
-export function loadBootstrapPeer(): BootstrapPeer {
-  const path = process.env.BOOTSTRAP_PEER_FILE ?? "bootstrap-peer.json";
+/**
+ * Load a bootstrap-peer file from an explicit path. The multi-connector spec
+ * loads two distinct files (one peer per sync-server); the error message names
+ * the actual file so a missing/empty bootstrap is unambiguous in CI logs.
+ */
+export function loadBootstrapPeerFrom(path: string): BootstrapPeer {
   const peer = JSON.parse(readFileSync(path, "utf8")) as BootstrapPeer;
   if (!Array.isArray(peer.linkingDataBlobs) || peer.linkingDataBlobs.length === 0) {
     throw new Error(
-      `bootstrap-peer.json must contain a non-empty linkingDataBlobs array. ` +
+      `${path} must contain a non-empty linkingDataBlobs array. ` +
         `Re-run bootstrap-peer with SHARE_CODES_COUNT >= the number of Playwright projects.`,
     );
   }
   return peer;
+}
+
+export function loadBootstrapPeer(): BootstrapPeer {
+  return loadBootstrapPeerFrom(process.env.BOOTSTRAP_PEER_FILE ?? "bootstrap-peer.json");
 }
 
 /**

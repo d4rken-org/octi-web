@@ -125,16 +125,23 @@ jobs:
   e2e-smoke:
     name: E2E smoke
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     # Mirrors the release-tag.yml e2e job at lower cost: bootstrap a fake phone
     # peer, build the SPA, drive it through Playwright with no screenshots.
     # Catches selector/bootstrap drift on every PR/main push so a release tag
-    # never surfaces these surprises for the first time.
+    # never surfaces these surprises for the first time. A second sync-server
+    # backs the multi-connector spec (link the SPA to two servers via the UI).
     services:
       sync-server:
         image: ghcr.io/d4rken-org/octi-server@sha256:3829efba5ca5a4d407a0d0a048b8d0c20264ad2f9e389aa087c857ea0d0bddaa
         ports:
           - 18080:8080
+        env:
+          OCTI_CORS_ALLOWED_ORIGINS: 'http://127.0.0.1:4173,http://localhost:4173'
+      sync-server-b:
+        image: ghcr.io/d4rken-org/octi-server@sha256:3829efba5ca5a4d407a0d0a048b8d0c20264ad2f9e389aa087c857ea0d0bddaa
+        ports:
+          - 18081:8080
         env:
           OCTI_CORS_ALLOWED_ORIGINS: 'http://127.0.0.1:4173,http://localhost:4173'
     steps:
@@ -143,23 +150,40 @@ jobs:
         with: { persist-credentials: false }
       - name: Setup environment
         uses: ./.github/actions/common-setup
-      - name: Wait for sync-server
+      - name: Wait for sync-servers
         run: |
           set -euo pipefail
-          for attempt in $(seq 1 30); do
-            if curl -sf http://127.0.0.1:18080/v1/status > /dev/null; then
-              echo "sync-server up after ${attempt}s"
-              exit 0
-            fi
-            sleep 1
+          for port in 18080 18081; do
+            for attempt in $(seq 1 30); do
+              if curl -sf "http://127.0.0.1:${port}/v1/status" > /dev/null; then
+                echo "sync-server on ${port} up after ${attempt}s"
+                continue 2
+              fi
+              sleep 1
+            done
+            echo "sync-server on ${port} did not respond within 30s" >&2
+            docker logs ${{ job.services.sync-server.id }} || true
+            docker logs ${{ job.services['sync-server-b'].id }} || true
+            exit 1
           done
-          echo "sync-server did not respond within 30s" >&2
-          docker logs ${{ job.services.sync-server.id }} || true
-          exit 1
-      - name: Bootstrap fake phone peer
+      # Three bootstrap files with independent one-time-use share codes:
+      #   bootstrap-peer.json (server A) — the single-connector smoke spec
+      #   peer-a.json (server A), peer-b.json (server B) — the multi-connector spec
+      # Separate files so the two specs never redeem the same code.
+      - name: Bootstrap fake phone peer (smoke, server A)
         env:
           SYNC_SERVER_URL: http://127.0.0.1:18080
           OUTPUT_PATH: bootstrap-peer.json
+        run: pnpm bootstrap-peer
+      - name: Bootstrap fake phone peer (multi, server A)
+        env:
+          SYNC_SERVER_URL: http://127.0.0.1:18080
+          OUTPUT_PATH: peer-a.json
+        run: pnpm bootstrap-peer
+      - name: Bootstrap fake phone peer (multi, server B)
+        env:
+          SYNC_SERVER_URL: http://127.0.0.1:18081
+          OUTPUT_PATH: peer-b.json
         run: pnpm bootstrap-peer
       - name: Install Playwright browsers
         run: pnpm exec playwright install --with-deps chromium
@@ -172,9 +196,16 @@ jobs:
         env:
           BOOTSTRAP_PEER_FILE: bootstrap-peer.json
         run: pnpm e2e:smoke
+      - name: Run E2E multi-connector
+        env:
+          BOOTSTRAP_PEER_A_FILE: peer-a.json
+          BOOTSTRAP_PEER_B_FILE: peer-b.json
+        run: pnpm e2e:multi
       - name: Dump sync-server logs on failure
         if: failure()
-        run: docker logs ${{ job.services.sync-server.id }} || true
+        run: |
+          docker logs ${{ job.services.sync-server.id }} || true
+          docker logs ${{ job.services['sync-server-b'].id }} || true
       - name: Upload Playwright trace on failure
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

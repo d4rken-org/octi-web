@@ -17,6 +17,7 @@
     "bootstrap-peer": "tsx tools/screenshots/bootstrap-peer.ts",
     "e2e": "playwright test tests/e2e/link-and-capture.spec.ts",
     "e2e:smoke": "playwright test tests/e2e/smoke.spec.ts",
+    "e2e:multi": "playwright test tests/e2e/multi-connector.spec.ts",
     "screenshots:thumbs": "node scripts/generate-thumbs.mjs"
   },
   "dependencies": {
