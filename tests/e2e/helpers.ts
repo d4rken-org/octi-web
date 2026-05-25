@@ -102,3 +102,53 @@ export async function linkViaPaste(page: Page, linkingDataBlob: string): Promise
   await page.locator('[data-testid="paste-submit"]').click();
   await waitForScreenReady(page, "dashboard");
 }
+
+/**
+ * Link a *second* (or further) sync source from inside the dashboard:
+ * Settings → Sync sources → Add another → paste flow.
+ *
+ * Unlike {@link linkViaPaste}, the Add-Source sheet hosts an `<Onboarding>` with
+ * `manageScreenshotMarker={false}`, so there is no `data-screenshot-ready`
+ * transition to await. Success is observed by the Sync Sources list (mounted
+ * behind the add sheet) growing to `expectedConnectorCount` cards; a join
+ * failure is surfaced fast via LinkPaste's inline error instead of timing out.
+ */
+export async function addSyncSourceViaPaste(
+  page: Page,
+  linkingDataBlob: string,
+  expectedConnectorCount: number,
+): Promise<void> {
+  await page.locator('[data-testid="nav-settings"]').click();
+  await waitForScreenReady(page, "settings");
+  await page.locator('[data-testid="settings-open-sources"]').click();
+  await page.locator('[data-testid="add-sync-source"]').click();
+  await page.locator('[data-testid="onboarding-paste"]').click();
+  await page.locator('[data-testid="paste-textarea"]').fill(linkingDataBlob);
+  await page.locator('[data-testid="paste-submit"]').click();
+
+  const connectorCards = page.locator('[data-testid="connector-card"]');
+  const pasteError = page.locator('[data-testid="paste-error"]');
+  // Race the success signal (new card appears) against the failure signal
+  // (inline error). `.catch` collapses each loser's timeout into a sentinel so
+  // the pending branch never surfaces as an unhandled rejection.
+  const outcome = await Promise.race([
+    connectorCards
+      .nth(expectedConnectorCount - 1)
+      .waitFor({ state: "visible" })
+      .then(() => "linked" as const)
+      .catch(() => "timeout" as const),
+    pasteError
+      .waitFor({ state: "visible" })
+      .then(() => "error" as const)
+      .catch(() => "no-error" as const),
+  ]);
+  if (outcome === "error") {
+    throw new Error(
+      `Add sync source failed: ${(await pasteError.textContent())?.trim() || "(empty error)"}`,
+    );
+  }
+  await expect(
+    connectorCards,
+    `${expectedConnectorCount} connector cards after adding sync source`,
+  ).toHaveCount(expectedConnectorCount);
+}

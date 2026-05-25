@@ -87,6 +87,6 @@
   </div>
 
   {#if error}
-    <p style="margin-top: 0.75rem; color: #ff8a8a;">{error}</p>
+    <p data-testid="paste-error" style="margin-top: 0.75rem; color: #ff8a8a;">{error}</p>
   {/if}
 </section>
