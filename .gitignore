@@ -19,3 +19,5 @@ playwright-report/
 # vitest's globalSetup before tests). Never edit by hand.
 .cache/interop-fixtures/
 
+/.pi/*
+!/.pi/settings.json
