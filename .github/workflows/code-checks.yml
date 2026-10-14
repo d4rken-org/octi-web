@@ -12,7 +12,7 @@ permissions:
 jobs:
   check:
     name: Type check
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -24,7 +24,7 @@ jobs:
 
   test:
     name: Unit tests
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -36,7 +36,7 @@ jobs:
 
   build:
     name: Production build
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -54,7 +54,7 @@ jobs:
 
   smoke:
     name: Smoke (real sync-server)
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     # Pin sync-server by digest so this test can never silently shift if `latest`
     # is republished. Refresh intentionally when targeting a different release.
@@ -106,7 +106,7 @@ jobs:
 
   release-tooling:
     name: Release tooling
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -124,7 +124,7 @@ jobs:
 
   e2e-smoke:
     name: E2E smoke
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     # Mirrors the release-tag.yml e2e job at lower cost: bootstrap a fake phone
     # peer, build the SPA, drive it through Playwright with no screenshots.

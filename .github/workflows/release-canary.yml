@@ -34,7 +34,7 @@ jobs:
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_branch == 'main')
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     concurrency:
       group: release-canary-build-${{ github.repository }}
       cancel-in-progress: true
@@ -103,7 +103,7 @@ jobs:
       # doesn't take this job down mid-publish.
       group: release-canary-publish-${{ github.repository }}
       cancel-in-progress: false
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
