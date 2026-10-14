@@ -20,7 +20,7 @@ concurrency:
 jobs:
   validate-tag:
     name: Validate tag
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Check tag-name format
         env:
@@ -71,7 +71,7 @@ jobs:
   e2e:
     needs: validate-tag
     name: E2E + screenshots (real sync-server)
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     # Boots the same digest-pinned sync-server the smoke job uses, seeds a fake
     # Pixel 7 peer, drives the SPA through Playwright, captures screenshots.
@@ -153,7 +153,7 @@ jobs:
   release-docker:
     needs: e2e
     name: Publish Docker image (ghcr.io)
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
@@ -212,7 +212,7 @@ jobs:
     name: Create GitHub release
     permissions:
       contents: write
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout source code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -263,7 +263,7 @@ jobs:
   screenshots-pr:
     needs: release-github
     name: Open screenshots PR
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
