@@ -15,6 +15,7 @@ import { resolve } from "node:path";
  *   VITE_COMMIT_SHA   — git SHA of the build (full)
  *   VITE_APP_VERSION  — semver, e.g. "0.1.0-rc1" or "0.1.0-canary.abc12345"
  *   VITE_BUILT_AT     — ISO8601 timestamp at build start
+ *   VITE_SITE_URL     — public site URL; set only for the stable Pages build
  *
  * Local dev (none of these set): channel="stable", commit="dev", version=package.json.
  *
@@ -52,12 +53,31 @@ function channelManifest(base: string): Plugin {
   };
 }
 
+/**
+ * Google site-name markup, emitted only when VITE_SITE_URL is set: canary and
+ * self-hosted builds must not claim the hosted site's URL.
+ */
+function siteName(siteUrl: string | undefined): Plugin {
+  return {
+    name: "octi-site-name",
+    apply: "build",
+    transformIndexHtml() {
+      if (!siteUrl) return [];
+      const website = { "@context": "https://schema.org", "@type": "WebSite", name: "Octi Web", url: siteUrl };
+      return [
+        { tag: "meta", attrs: { property: "og:site_name", content: "Octi Web" }, injectTo: "head" },
+        { tag: "script", attrs: { type: "application/ld+json" }, children: JSON.stringify(website), injectTo: "head" },
+      ];
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "VITE_");
   const base = env.VITE_BASE || "/";
   return {
     base,
-    plugins: [svelte(), channelManifest(base)],
+    plugins: [svelte(), channelManifest(base), siteName(env.VITE_SITE_URL)],
     build: {
       target: "es2022",
       sourcemap: true,

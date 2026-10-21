@@ -92,6 +92,7 @@ jobs:
           VITE_BASE: "/"
           VITE_CHANNEL: stable
           VITE_APP_VERSION: ${{ steps.latest.outputs.tag }}
+          VITE_SITE_URL: https://web.octi.darken.eu/
         run: |
           set -euo pipefail
           export VITE_COMMIT_SHA=$(git rev-parse HEAD)
